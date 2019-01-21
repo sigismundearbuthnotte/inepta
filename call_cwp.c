@@ -40,7 +40,7 @@ void read_table(int rows,int cols,const char *fileName,float *table,bool skip1st
     fclose(fp);
 }
 
-const int numPols=100000, numOutputs=1;
+const int numPols=100000, numOutputs=4;
 
 int main(int argc, char *argv[])
 {
@@ -55,12 +55,12 @@ renexps = (float*)  malloc(1*sizeof(float));
 revbonus = (float*)  malloc(1*sizeof(float));
 lapse = (float*)  malloc(1*sizeof(float));
 surrpropnas = (float*)  malloc(1*sizeof(float));
-read_table(1,1,"/home/andrew/futhark/inepta/manual_cwp/tables/lapse",lapse,true);
-read_table(1,1,"/home/andrew/futhark/inepta/manual_cwp/tables/revbonus",revbonus,true);
-read_table(1,1,"/home/andrew/futhark/inepta/manual_cwp/tables/renexps",renexps,true);
-read_table(1,1,"/home/andrew/futhark/inepta/manual_cwp/tables/matypropnas",matypropnas,true);
-read_table(1,1,"/home/andrew/futhark/inepta/manual_cwp/tables/surrpropnas",surrpropnas,true);
-read_table(100,1,"/home/andrew/futhark/inepta/manual_cwp/tables/mort",mort,true);
+read_table(1,2,"/home/andrew/futhark/inepta/manual_cwp/tables/lapse",lapse,true);
+read_table(1,2,"/home/andrew/futhark/inepta/manual_cwp/tables/revbonus",revbonus,true);
+read_table(1,2,"/home/andrew/futhark/inepta/manual_cwp/tables/renexps",renexps,true);
+read_table(1,2,"/home/andrew/futhark/inepta/manual_cwp/tables/matypropnas",matypropnas,true);
+read_table(1,2,"/home/andrew/futhark/inepta/manual_cwp/tables/surrpropnas",surrpropnas,true);
+read_table(100,2,"/home/andrew/futhark/inepta/manual_cwp/tables/mort",mort,true);
 
 //create Futhark arrays for tables
 struct futhark_f32_2d *fut_mort=futhark_new_f32_2d(ctx, mort,100,1);
@@ -76,27 +76,19 @@ float *dataFloat, *dataAll;
 dataInt = (int*)  malloc(numPols*8*sizeof(int));
 dataAll = (float*)  malloc(numPols*12*sizeof(float));
 dataFloat = (float*)  malloc(numPols*4*sizeof(float));
-read_table(numPols,8,"/home/andrew/futhark/inepta/manual_cwp/data/cwp1.data",dataAll,false);
+read_table(numPols,12,"/home/andrew/futhark/inepta/manual_cwp/data/cwp1.data",dataAll,false);
 for (int p=0;p<numPols;++p)
 {
     int startInt,startAll,startFloat;
-    startAll=(p-1)*12;
-    startInt=(p-1)*8;
-    startFloat=(p-1)*4;
+    startAll=p*12;
+    startInt=p*8;
+    startFloat=p*4;
 
-    dataInt[startInt+0]=(int)dataAll[startAll+0];
-    dataInt[startInt+1]=(int)dataAll[startAll+1];
-    dataInt[startInt+2]=(int)dataAll[startAll+2];
-    dataInt[startInt+3]=(int)dataAll[startAll+3];
-    dataInt[startInt+4]=(int)dataAll[startAll+4];
-    dataInt[startInt+5]=(int)dataAll[startAll+5];
-    dataInt[startInt+6]=(int)dataAll[startAll+6];
-    dataInt[startInt+7]=(int)dataAll[startAll+7];
+    for (int i=0;i<8;++i)
+        dataInt[startInt+i]=(int)dataAll[startAll+i];
 
-    dataFloat[startFloat+0]=dataAll[startAll+8];
-    dataFloat[startFloat+1]=dataAll[startAll+9];
-    dataFloat[startFloat+2]=dataAll[startAll+10];
-    dataFloat[startFloat+3]=dataAll[startAll+11];
+    for (int i=0;i<4;++i)
+        dataFloat[startFloat+i]=dataAll[startAll+8+i];
 }
 
 //create Futhark arrays for data
@@ -114,6 +106,10 @@ int futErr=futhark_entry_main(ctx,&futRes,fut_dataInt,fut_dataFloat,numPeriods,f
 
 //get results
 futhark_values_f32_2d(ctx,futRes,futResC);
+
+//Print results for last policy
+for (int i=0;i<numOutputs;++i)
+    printf("%f\n",futResC[numOutputs*(numPols-1)+i]);
 
 //free data, tables, results arrays
 free(lapse);
@@ -133,7 +129,7 @@ futhark_free_f32_2d(ctx,fut_mort);
 futhark_free_f32_2d(ctx,fut_renexps);
 futhark_free_f32_2d(ctx,fut_revbonus);
 futhark_free_f32_2d(ctx,fut_surrpropnas);
-futhark_free_f32_2d(ctx,fut_dataInt);
+futhark_free_i32_2d(ctx,fut_dataInt);
 futhark_free_f32_2d(ctx,fut_dataFloat);
 futhark_free_f32_2d(ctx,futRes);
 

@@ -38,10 +38,11 @@ let normsDist (x:f32) :f32 = -- cumulative Normal
     if x>=0.0f32 then (ND (x))  else 1.0f32-(ND (-x)) 
 
 let putOption(s:f32) (k:f32) (r:f32) (t:f32) (sigma:f32) :f32 = 
+    let s2=f32.max s 1f32 --hack!
     let sig_sqrt_t=sigma*(sqrt (t)) 
-    let d1=((log (s/k)) +(r+0.5f32*sigma*sigma)*t)/sig_sqrt_t
+    let d1=((log (s2/k)) +(r+0.5f32*sigma*sigma)*t)/sig_sqrt_t
     let d2=d1-sig_sqrt_t
-    in k*(exp (-r*t)) *(normsDist (-d2)) -s*(normsDist (-d1)) 
+    in k*(exp (-r*t)) *(normsDist (-d2)) -s2*(normsDist (-d1)) 
 
 --data record.  These do not have to have the types grouped but it makes life slightly easier when converting the input data arrays 
 type data_cwp={
@@ -104,7 +105,8 @@ type state_cwp_all={
     intermediate: state_cwp_inter,
     results: state_cwp_results,
     state_new:state_cwp,
-    t:i32
+    t:i32,
+    forceTheIssue:f32
 }
 
 let dataFromArrayscwp [nr] (dataInt:[nr][data_cwp_numInt]i32) (dataFloat:[nr][data_cwp_numFloat]f32) : []data_cwp=
@@ -112,7 +114,7 @@ let dataFromArrayscwp [nr] (dataInt:[nr][data_cwp_numInt]i32) (dataFloat:[nr][da
     let tuplesF = map (\x->(x[0],x[1],x[2],x[3])) dataFloat
     in map2 (\x y :data_cwp->{polID=x.1,prod=x.2,ageYears=x.3,ageMonths=x.4,termOS=x.5,sex=x.6,fundID=x.7,elapsed_period=x.8,sumAssured=y.1,revBonus=y.2,premMonthly=y.3,assetShare=y.4}) tuplesI tuplesF
 
-let main [numPols] (fileDataInt:[numPols][data_cwp_numInt]i32) (fileDataReal:[numPols][data_cwp_numFloat]f32) (numPeriods:i32) (table_deathRates:[][]f32) (table_lapseRates:[][]f32) (table_revBonusRateMonthly:[][]f32) (table_renExpsMonthly:[][]f32) (table_surrPropnAssetShare:[][]f32) (table_matyPropnAssetShare:[]f32) :[][]f32 = 
+let main [numPols] (fileDataInt:[numPols][data_cwp_numInt]i32) (fileDataReal:[numPols][data_cwp_numFloat]f32) (numPeriods:i32) (table_deathRates:[][]f32) (table_lapseRates:[][]f32) (table_revBonusRateMonthly:[][]f32) (table_renExpsMonthly:[][]f32) (table_surrPropnAssetShare:[][]f32) (table_matyPropnAssetShare:[][]f32) :[][]f32 = 
     -- read data
     unsafe --probably (we hope) needed as table reads are "unsafe"
     let data_cwp=dataFromArrayscwp fileDataInt fileDataReal
@@ -130,9 +132,9 @@ let main [numPols] (fileDataInt:[numPols][data_cwp_numInt]i32) (fileDataReal:[nu
         let v=0.2f32
         let rfr=0.05f32
         let tt=(real (d.termOS))   
-        let COG=putOption d.assetShare ((d.sumAssured+d.revBonus)*table_matyPropnAssetShare[d.prod]) rfr tt v
+        let COG=putOption d.assetShare ((d.sumAssured+d.revBonus)*table_matyPropnAssetShare[d.prod,0]) rfr tt v
         let volAdjs=[-0.02f32,-0.01f32,0.0f32,0.01f32,0.02f32]  
-        let COG2 = map (putOption d.assetShare ((d.sumAssured+d.revBonus)*table_matyPropnAssetShare[d.prod]) rfr tt) (map2 (+) (replicate 5 v) volAdjs)
+        let COG2 = map (putOption d.assetShare ((d.sumAssured+d.revBonus)*table_matyPropnAssetShare[d.prod,0]) rfr tt) (map2 (+) (replicate 5 v) volAdjs)
         let pvCOG=0.0f32  
         let dBen=0.0f32  
         let COGDiff = zeros1 5
@@ -184,7 +186,7 @@ let main [numPols] (fileDataInt:[numPols][data_cwp_numInt]i32) (fileDataReal:[nu
     let COG(as: state_cwp_all): state_cwp_all =
         let v=0.2f32 --TODO ESG, even for serial?
         let rfr=0.05f32
-        let tt=real (as.p.termOS-as.t)
+        let tt=real (as.p.termOS-as.t+2i32)
         in as with state_new.COG = putOption as.state_new.assetShareCF as.intermediate.gteeBen rfr tt v
 
     let dBen(as: state_cwp_all): state_cwp_all =
@@ -201,10 +203,16 @@ let main [numPols] (fileDataInt:[numPols][data_cwp_numInt]i32) (fileDataReal:[nu
     let reserveCF(as: state_cwp_all): state_cwp_all =
         as with state_new.reserveCF = as.state_new.assetShareCF+as.state_new.COG  
 
+    --Forcing: Futhark optimises away stuff it thinks you don't need, so there's a need to force everthing
+    let forceTheIssue(as: state_cwp_all): state_cwp_all =
+        as with forceTheIssue = 
+            real(as.state_new.termO_S)+as.state_new.reserveCF+as.state_new.revBonusCF+as.state_new.survCF+
+            as.state_new.assetShareCF+real(as.state_new.ageYrs+as.state_new.ageMths)+as.state_new.COG+sum(as.state_new.COG2)+as.state_new.dBen
+
     -- One period: pipeline transitions and storage
     let runOnePeriod(as: state_cwp_all): state_cwp_all=
         as |> COG3 |> termO_S |> ageMths |> ageYrs |> monthlyRates |> survCF |> cflow |> revBonusCF |> assetShareCF |>gteeBen |>
-            COG |> dBen |> COG2 |> COGDiff |> reserveCF
+            COG |> dBen |> COG2 |> COGDiff |> reserveCF |> forceTheIssue
 
     -- Store results for next period
     let store(as: state_cwp_all): state_cwp_all = 
@@ -215,7 +223,8 @@ let main [numPols] (fileDataInt:[numPols][data_cwp_numInt]i32) (fileDataReal:[nu
         intermediate = as.intermediate,
         results= as.results,
         state_new = as.state_new,
-        t=as.t+1
+        t=as.t+1,
+        forceTheIssue=as.forceTheIssue*0.001f32 --carry forward the forcing, so all perods forced
     }
 
     -- time loop
@@ -239,14 +248,14 @@ let main [numPols] (fileDataInt:[numPols][data_cwp_numInt]i32) (fileDataReal:[nu
             intermediate={gteeBen=0f32,qxMonthly=0f32,lapseRateMonthly=0f32},
             results={cflow=0f32},
             state_new=init_state_cwp, -- do not care what the values are so reuse initial values
-            t=1i32
+            t=1i32,
+            forceTheIssue=0f32
         }
 
         -- final state TODO final as in maturity
         let final_all_state = ((runAllPeriods pol.termOS) >-> runFinalise) init_all_state
 
-        --return results
-        let res=[final_all_state.results.cflow]
+        let res=[final_all_state.state_new.assetShareCF, final_all_state.intermediate.gteeBen,final_all_state.state_new.COG,final_all_state.forceTheIssue]
 
         -- TODO anything special required for PVs?
 

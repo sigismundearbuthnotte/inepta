@@ -1,0 +1,5 @@
+futhark-c --library cwp.fut
+
+gcc cwp.c -o libcwp.so -O3 -fPIC -shared
+
+gcc call_cwp.c libcwp.so -O3 -lm -ocall_cwp
