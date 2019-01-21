@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
+#include <time.h>
 
 void read_table(int rows,int cols,const char *fileName,float *table,bool skip1st)
 {
@@ -55,12 +56,12 @@ renexps = (float*)  malloc(1*sizeof(float));
 revbonus = (float*)  malloc(1*sizeof(float));
 lapse = (float*)  malloc(1*sizeof(float));
 surrpropnas = (float*)  malloc(1*sizeof(float));
-read_table(1,2,"/home/andrew/futhark/inepta/manual_cwp/tables/lapse",lapse,true);
-read_table(1,2,"/home/andrew/futhark/inepta/manual_cwp/tables/revbonus",revbonus,true);
-read_table(1,2,"/home/andrew/futhark/inepta/manual_cwp/tables/renexps",renexps,true);
-read_table(1,2,"/home/andrew/futhark/inepta/manual_cwp/tables/matypropnas",matypropnas,true);
-read_table(1,2,"/home/andrew/futhark/inepta/manual_cwp/tables/surrpropnas",surrpropnas,true);
-read_table(100,2,"/home/andrew/futhark/inepta/manual_cwp/tables/mort",mort,true);
+read_table(1,2,"/home/andrew/inepta/tables/lapse",lapse,true);
+read_table(1,2,"/home/andrew/inepta/tables/revbonus",revbonus,true);
+read_table(1,2,"/home/andrew/inepta/tables/renexps",renexps,true);
+read_table(1,2,"/home/andrew/inepta/tables/matypropnas",matypropnas,true);
+read_table(1,2,"/home/andrew/inepta/tables/surrpropnas",surrpropnas,true);
+read_table(100,2,"/home/andrew/inepta/tables/mort",mort,true);
 
 //create Futhark arrays for tables
 struct futhark_f32_2d *fut_mort=futhark_new_f32_2d(ctx, mort,100,1);
@@ -76,7 +77,7 @@ float *dataFloat, *dataAll;
 dataInt = (int*)  malloc(numPols*8*sizeof(int));
 dataAll = (float*)  malloc(numPols*12*sizeof(float));
 dataFloat = (float*)  malloc(numPols*4*sizeof(float));
-read_table(numPols,12,"/home/andrew/futhark/inepta/manual_cwp/data/cwp1.data",dataAll,false);
+read_table(numPols,12,"/home/andrew/inepta/data/cwp1.data",dataAll,false);
 for (int p=0;p<numPols;++p)
 {
     int startInt,startAll,startFloat;
@@ -102,7 +103,11 @@ float *futResC=(float*) malloc(numOutputs*numPols*sizeof(float));
 int32_t numPeriods=600;
 
 //call Futhark
+struct timespec startTime,endTime;
+clock_gettime(CLOCK_PROCESS_CPUTIME_ID,&startTime);
 int futErr=futhark_entry_main(ctx,&futRes,fut_dataInt,fut_dataFloat,numPeriods,fut_mort,fut_lapse,fut_revbonus,fut_renexps,fut_surrpropnas,fut_matypropnas);
+clock_gettime(CLOCK_PROCESS_CPUTIME_ID,&endTime);
+double diffTime=(endTime.tv_sec-startTime.tv_sec)+(endTime.tv_nsec-startTime.tv_nsec)/1e9;
 
 //get results
 futhark_values_f32_2d(ctx,futRes,futResC);
@@ -110,6 +115,7 @@ futhark_values_f32_2d(ctx,futRes,futResC);
 //Print results for last policy
 for (int i=0;i<numOutputs;++i)
     printf("%f\n",futResC[numOutputs*(numPols-1)+i]);
+printf("%f\n",diffTime);
 
 //free data, tables, results arrays
 free(lapse);
