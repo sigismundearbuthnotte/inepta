@@ -1,0 +1,16 @@
+Many bases
+Discounting
+Rebasing
+Not-rebasing (proxy)
+Storing stuff for reuse
+Grouping by term o/s
+New Business
+Batching of data through the GPU
+2-D structures
+Table lookups (not as complicated as currently?)
+Results - complicated output (see above)
+Phases (even for independent) due to need for proxies/interpolation
+System variables (add to all-state?)
+Generalised for basis "tree" (or graph?: "Basis-Graph") setting out dependencies of one basis on another (i.e. saying how much changes e.g. expenses only)
+Use my arrayed calcs for multiple PVs or e.g. expenses bases
+Force all (avoid Futhark being overly clever)
