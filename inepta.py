@@ -5,6 +5,12 @@ import re
 #constants
 nl="\n"
 userDefinedFns={"real","exp","sqrt","log","sum","prod","zeros1","zeros2","zeros3","backDisc"}
+multiBracket={}#lots of []
+br="[]"
+multiBracket[0]=""
+for i in range(1,100):
+    multiBracket[i]=br
+    br+="[]"
 
 #subdirs
 rootSubDir=sys.argv[1]
@@ -31,6 +37,9 @@ class modelInfo(object):#persistent data for a model
         self.dataFieldInfos={}
         self.phases={}#indexed by name, returns dict of calcInfoObjects
         self.tableInfos={}
+        self.hasData=False
+        self.hasDerived=False
+        self.esg={}#only top model should have one of these
 
 class dataFieldInfo(object):#covers derived fields as well
     def __init__(self):
@@ -45,7 +54,7 @@ class calcInfoObject:
         self.type="real"
         self.stores=0
         self.isArrayed=False
-        self.numDims=1
+        self.numDims=0
         self.dimSizes=[]
         self.storeAtRebase=False
         self.code=[]
@@ -72,7 +81,7 @@ def nwscap(l,splits):
     for c in range(0,len(splits)):
         ls1=[ll.split(splits[c]) for ll in ls]
         ls=[it for sl in ls1 for it in sl]
-    return (ls,not(l[0:2]=="//" or l==""),[ll.upper() for ll in ls])#bool is whether it's a comment or empty
+    return ([ll for ll in ls if ll!=""],not(l[0:2]=="//" or l==""),[ll.upper() for ll in ls if ll!=""])#bool is whether it's a comment or empty
 
 #eliminate excess white space,capitalise,check if it's a comment and split on multiple delimiters
 def newscap(l,splits):
@@ -86,7 +95,7 @@ def newscap(l,splits):
     for c in range(0,len(splits)):
         ls1=[ll.split(splits[c]) for ll in ls]
         ls=[it for sl in ls1 for it in sl]
-    return (l,ls,not(l[0:2]=="//" or l==""),[ll.upper() for ll in ls])#bool is whether it's a comment or empty
+    return (l,[ll for ll in ls if ll!=""],not(l[0:2]=="//" or l==""),[ll.upper() for ll in ls if ll!=""])#bool is whether it's a comment or empty
 
 def readBasicModelInfo(mfn):
     mi=modelInfo()
@@ -133,6 +142,7 @@ def readBasicModelInfo(mfn):
                 if lsu[0]=="START":
                     mi.startField=ls[1]
             if section == "DATA" or section == "DERIVED":
+                mi.hasData=True
                 df=dataFieldInfo()
                 df.name=ls[0]
                 if  not ls[1].__contains__("["):#arrayed?
@@ -143,7 +153,8 @@ def readBasicModelInfo(mfn):
                     df.arraySize=int(ll[1])
                 mi.dataFieldInfos[df.name]=df
             if section == "DERIVED":
-                df.expression=ls[2]
+                df.expression=l[l.find("=")+1:]
+                mi.hasDerived=True
             if section=="PHASE":
                 if lsu[0]=="NAME":
                     currPhase={}
@@ -152,6 +163,8 @@ def readBasicModelInfo(mfn):
                 if l[0:4]=="call":
                     ci.isCall=True
                     ci.name=l[4:].strip()
+                    currPhase[ls[0]] = ci
+                    ci.stores=-2
                     continue
                 if lsu[0]=="INITIALISE":
                     ci.initialisation=l
@@ -180,6 +193,12 @@ def readBasicModelInfo(mfn):
                     if lsu[i]=="DIMS":
                         inDims=True
                 mi.tableInfos[t.name]=t
+            if section=="ESG":
+                (fieldInfo,_,_)=nwscap(l,"[]")
+                if len(fieldInfo)==1:
+                    mi.esg[fieldInfo[0]]=[1]
+                else:
+                    mi.esg[fieldInfo[0]] = [int(fieldInfo[i]) for i in range(1,len(fieldInfo))]
     ift.close()
     return mi
 
@@ -372,5 +391,185 @@ for mi in modelInfos.values():
     dataFieldsReal=dataFieldsReal[0:len(dataFieldsReal)-1]
     off.write("map2 (\\x y :data_"+mi.name+"->{"+dataFieldsInt+dataFieldsReal+"}) dataInt dataReal"+nl)
 
+#derived types
+off.write(nl)
+for mi in modelInfos.values():
+    if mi.hasDerived:
+        off.write("type derived_"+mi.name+"={"+nl)
+        comma=""
+        for df in mi.dataFieldInfos.values():
+            if df.expression=="":
+                continue
+            typ="int"
+            if df.type=="real":
+                typ="real"
+            off.write(comma+df.name+":"+typ+nl)
+            comma=","
+        off.write("}\n")
+
+#various state types including containers for past values and the all-state
+for mi in modelInfos.values():
+    maxStored=0
+    haveAll=False
+    have0=False
+    for ph in mi.phases.values():
+        for ci in ph.values():#find maximum storage
+            if ci.stores==-1:
+                haveAll=True
+                have0=True
+            if ci.stores>maxStored:
+                maxStored=ci.stores
+            if ci.stores==0:
+                have0=True
+
+    #main state
+    off.write("\ntype state_"+mi.name+"={\n")
+    comma=""
+    for ph in mi.phases.values():
+        for ci in ph.values():
+            if ci.stores>0:
+                typ = "int"
+                if ci.type == "real":
+                    typ = "real"
+                brackets=""
+                for i in range(0,ci.numDims):
+                    brackets=brackets+"["+str(ci.dimSizes[i])+"]"
+                off.write(comma+ci.name+":"+brackets+typ+nl)
+                comma=","
+    off.write("}\n")
+
+    #loop through past states (>1)
+    for i in range(2,maxStored+1):
+        off.write("\ntype state_" + mi.name +"__"+str(i)+ "={\n")
+        comma = ""
+        for ph in mi.phases.values():
+            for ci in ph.values():
+                if ci.stores >= i:
+                    typ = "int"
+                    if ci.type == "real":
+                        typ = "real"
+                    brackets = ""
+                    for i in range(0, ci.numDims):
+                        brackets = brackets + "[" + str(ci.dimSizes[i]) + "]"
+                    off.write(comma + ci.name + ":" + brackets + typ + nl)
+                    comma = ","
+        off.write("}\n")
+
+    #intermediate
+    if have0:
+        off.write("\ntype state_" + mi.name +"_inter={\n")
+        comma = ""
+        for ph in mi.phases.values():
+            for ci in ph.values():
+                if ci.stores ==0 or ci.stores==-1:
+                    typ = "int"
+                    if ci.type == "real":
+                        typ = "real"
+                    brackets = ""
+                    for i in range(0, ci.numDims):
+                        brackets = brackets + "[" + str(ci.dimSizes[i]) + "]"
+                    off.write(comma + ci.name + ":" + brackets + typ + nl)
+                    comma = ","
+        off.write("}\n")
+
+    #store all
+    if haveAll:
+        off.write("\ntype state_" + mi.name +"__999={\n")
+        comma = ""
+        for ph in mi.phases.values():
+            for ci in ph.values():
+                if ci.stores ==-1 :
+                    typ = "int"
+                    if ci.type == "real":
+                        typ = "real"
+                    off.write(comma + ci.name + ":[]" + typ + nl)#not allowing store-all for arrayed calcs
+                    comma = ","
+        off.write("}\n")
+
+    #all-state
+    off.write("\ntype state_" + mi.name +"_all={\n")
+    if mi.hasData:
+        off.write("p:data_"+mi.name+","+nl)
+    if haveAll:
+        off.write("state__999:state_"+mi.name+"__999,"+nl)
+    for i in range(2,maxStored+1):
+        off.write("state__" +str(i)+ ":state_"+mi.name+"__"+str(i)+","+nl)
+    off.write("state__1:state_" + mi.name + "," + nl)
+    off.write("intermediate:state_"+mi.name+"_inter"+","+nl)
+    off.write("state_new:state_" + mi.name + "," + nl)
+    off.write("t:i32,\n")
+    off.write("forceTheIssue:f32,\n")
+    off.write("basisNum:i32\n}\n")
+
+#scenario type
+off.write("\ntype oneScen={\n")
+for mi in modelInfos.values():
+    if mi.esg!={}:
+        comma=""
+        for (k,v) in mi.esg.items():
+            off.write(comma+k+":[]")
+            if v!=[1]:
+                for i in v:
+                    off.write("["+str(i)+"]")
+            off.write("f32\n")
+            comma=","
+        off.write("}\n\n")
+        break
+
+#main function
+off.write(nl)
+if not isDependent:#integer parameters
+    mainParams=" [numPols] [numBases]  (numPeriods:i32) "
+else:
+    mainParams=" (numPeriods:i32) (numIters:i32) "
+off.write("let main "+mainParams)
+for mi in modelInfos.values():#data files
+    if mi.hasData:
+        off.write("(fileDataInt_"+mi.name+":[numPols][]i32) (fileDataReal_"+mi.name+":[numPols][]f32)")
+if  not isDependent:#rebasing info
+    off.write(" (doRebase:[numBases]bool) (isRebaseTime:[numPeriods]bool) ")
+for mi in modelInfos.values():#tables
+    for t in mi.tableInfos.values():
+        off.write(" (table_"+t.name+"_"+mi.name+":[numBases]"+multiBracket[len(t.dims)]+"f32)")
+off.write(":[][]f32="+nl)
+
+off.write("\nunsafe\n\n")
+
+#derived setting functions (inside main because they might use tables)
+for mi in modelInfos.values():
+    if mi.hasDerived:
+        off.write("\nlet setDerived_"+mi.name+"(d:data_"+mi.name+"):derived_"+mi.name+"="+nl)
+        for df in mi.dataFieldInfos.values():#set temporary variables to derived expressions
+            if df.expression!="":
+                expr=" "+df.expression+" "
+                for kt in mi.tableInfos.keys():#convert table name to name of main parameter
+                    expr=re.sub("[\W]"+kt+"[\W]",lambda x:x.group()[0]+"table_"+kt+"_"+mi.name+x.group()[len(kt)+1:],expr)
+                for df2 in mi.dataFieldInfos.values():#add d. in front of data fields
+                    expr=re.sub("[\W]"+df2.name+"[\W]",lambda x:x.group()[0]+"d."+df2.name+x.group()[len(df2.name)+1:],expr)
+                off.write("\tlet "+df.name+"="+expr)
+        off.write("\n\tin\n\t{")
+        for df in mi.dataFieldInfos.values():#assemble the output record
+            if df.expression!="":
+                off.write(df.name+"="+df.name)
+        off.write("}\n")
+
+#get data
+off.write(nl)
+for mi in modelInfos.values():
+    if mi.hasData:
+        off.write("let data_"+mi.name+"=dataFromArrays_"+mi.name+" fileDataInt_"+mi.name+" fileDataReal_"+mi.name+nl)
+
+#get derived
+for mi in modelInfos.values():
+    if mi.hasDerived:
+        off.write("let derived_"+mi.name+"=map setDerived_"+mi.name+" data_"+mi.name+nl)
+
+#some constants for an independent run
+if not isDependent:
+    off.write("\nlet numRebased = length(filter (id) doRebase)\n")
+    off.write("let numProxies = length(filter (!) doRebase)\n")
+    off.write("let zerosArray=zeros1 numPeriods\n")
+
 #closure
+off.write("in [[0]]")#temporary return value
 off.close()
