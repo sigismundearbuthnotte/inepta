@@ -40,6 +40,8 @@ class modelInfo(object):#persistent data for a model
         self.hasData=False
         self.hasDerived=False
         self.esg={}#only top model should have one of these
+        self.forceThese=[]
+        self.maxStored=0#excluding alls
 
 class dataFieldInfo(object):#covers derived fields as well
     def __init__(self):
@@ -141,6 +143,8 @@ def readBasicModelInfo(mfn):
                     mi.termField=ls[1]
                 if lsu[0]=="START":
                     mi.startField=ls[1]
+                if lsu[0]=="FORCE":
+                    mi.forceThese=ls[1:]
             if section == "DATA" or section == "DERIVED":
                 mi.hasData=True
                 df=dataFieldInfo()
@@ -173,6 +177,7 @@ def readBasicModelInfo(mfn):
                         firstLine=False
                         currPhase[ls[0]]=ci
                         ci.name=ls[0]
+                        l=l[l.find("=")+1:]#remove "calc="
                     ci.code.append(l)
             if section == "TABLES":
                 t=tableInfoObject()
@@ -199,6 +204,7 @@ def readBasicModelInfo(mfn):
                     mi.esg[fieldInfo[0]]=[1]
                 else:
                     mi.esg[fieldInfo[0]] = [int(fieldInfo[i]) for i in range(1,len(fieldInfo))]
+
     ift.close()
     return mi
 
@@ -421,13 +427,14 @@ for mi in modelInfos.values():
                 maxStored=ci.stores
             if ci.stores==0:
                 have0=True
+    ci.maxStored=maxStored
 
     #main state
     off.write("\ntype state_"+mi.name+"={\n")
     comma=""
     for ph in mi.phases.values():
         for ci in ph.values():
-            if ci.stores>0:
+            if ci.stores>0  or ci.stores==-1:
                 typ = "int"
                 if ci.type == "real":
                     typ = "real"
@@ -461,7 +468,7 @@ for mi in modelInfos.values():
         comma = ""
         for ph in mi.phases.values():
             for ci in ph.values():
-                if ci.stores ==0 or ci.stores==-1:
+                if ci.stores ==0:
                     typ = "int"
                     if ci.type == "real":
                         typ = "real"
@@ -490,6 +497,8 @@ for mi in modelInfos.values():
     off.write("\ntype state_" + mi.name +"_all={\n")
     if mi.hasData:
         off.write("p:data_"+mi.name+","+nl)
+    if mi.hasDerived:
+        off.write("der:derived_"+mi.name+","+nl)
     if haveAll:
         off.write("state__999:state_"+mi.name+"__999,"+nl)
     for i in range(2,maxStored+1):
@@ -501,10 +510,12 @@ for mi in modelInfos.values():
     off.write("forceTheIssue:f32,\n")
     off.write("basisNum:i32\n}\n")
 
-#scenario type
-off.write("\ntype oneScen={\n")
+#scenario type and conversion function
+hasESG=False
 for mi in modelInfos.values():
     if mi.esg!={}:
+        hasESG=True
+        off.write("\ntype oneScen={\n")#scenario type
         comma=""
         for (k,v) in mi.esg.items():
             off.write(comma+k+":[]")
@@ -514,6 +525,26 @@ for mi in modelInfos.values():
             off.write("f32\n")
             comma=","
         off.write("}\n\n")
+        off.write("let oneScenFromArray [np][nc] (scen:[np][nc]f32): oneScen=\n")#convert one scenario (1 index of the outer dimension of the scenario file) to a oneScen
+        colCount=0
+        for (k,v) in mi.esg.items():#get arrays
+            if v==[1]:#scalar
+                off.write("\tlet "+k+"=flatten scen[:,"+str(colCount)+":"+str(colCount+1)+"]"+nl)
+                colCount+=1
+            elif len(v)==1: #vector
+                off.write("\tlet "+k+"=scen[:,"+str(colCount)+":"+str(colCount+v[0])+"]"+nl)
+                colCount+=v[0]
+            else: #matrix (grid)
+                off.write("\tlet "+k+"=unflatten "+str(v[0])+" "+str(v[1])+" scen[:,"+str(colCount)+":"+str(colCount+v[0]*v[1])+"]"+nl)
+                colCount+=v[0]*v[1]
+        off.write("\n\tin\n\t{")
+        comma=""
+        for (k,v) in mi.esg.items():#pack arrays in record
+            off.write(comma+k+"="+k)
+            comma=","
+        off.write("}\n")
+        off.write("\nlet scensFromArrays(scens: [][][]f32):[]oneScen =\n")#convert whole scenario file to array of oneScens
+        off.write("\tmap oneScenFromArray scens\n")
         break
 
 #main function
@@ -569,6 +600,199 @@ if not isDependent:
     off.write("\nlet numRebased = length(filter (id) doRebase)\n")
     off.write("let numProxies = length(filter (!) doRebase)\n")
     off.write("let zerosArray=zeros1 numPeriods\n")
+
+#initialisation functions (local as need access to tables)
+for mi in modelInfos.values():
+    off.write("\nlet init_"+mi.name)
+    if mi.hasData:
+        off.write(" (d:data_"+mi.name+") ")
+    if mi.hasDerived:
+        off.write(" (der:derived_" + mi.name + ") ")
+    if hasESG:
+        off.write(" (scen:oneScen) ")
+    off.write(":state_"+mi.name+"=\n")
+    for ph in mi.phases.values():
+        for ci in ph.values():
+            if ci.stores>0 or ci.stores==-1:#only those in state
+                if ci.initialisation!="":
+                    pos=ci.initialisation.find("=")
+                    expr=ci.initialisation[pos+1:]
+                    expr=" "+expr+" "
+                    for kt in mi.tableInfos.keys():#convert table name to name of main parameter
+                        expr=re.sub("[\W]"+kt+"[\W]",lambda x:x.group()[0]+"table_"+kt+"_"+mi.name+x.group()[len(kt)+1:],expr)
+                    for df2 in mi.dataFieldInfos.values():#add d. in front of data fields or der. for derived
+                        if df2.expression=="":
+                            expr=re.sub("[\W]"+df2.name+"[\W]",lambda x:x.group()[0]+"d."+df2.name+x.group()[len(df2.name)+1:],expr)
+                        else:
+                            expr=re.sub("[\W]"+df2.name+"[\W]",lambda x:x.group()[0]+"der."+df2.name+x.group()[len(df2.name)+1:],expr)
+                    off.write("\tlet "+ci.name+"="+expr+nl)
+                else:#zeroise
+                    if ci.numDims==0:
+                        off.write("\tlet "+ci.name+"=0\n")
+                    else:
+                        off.write("\tlet "+ ci.name+"=zeros"+str(ci.numDims)+" "+" ".join(map (str,ci.dimSizes))+nl)
+    off.write("\n\tin {")
+    comma=""
+    for ph in mi.phases.values():#compose the record
+        for ci in ph.values():
+            if ci.stores > 0 or ci.stores == -1:
+                off.write(comma+ci.name+"="+ci.name)
+                comma=","
+    off.write("}\n\n")
+
+#generate calculations - append model name to name to avoid clashes
+#main effort here is to pull past values out of the correct bit of the all-state
+#TODO not done:
+#reference to other models (incl. filtering and reduction)
+#reference to ESG
+#calls
+#variants
+for mi in modelInfos.values():
+    for ph in mi.phases.values():
+        for ci in ph.values():
+            if not ci.isCall:
+                off.write("let "+ci.name+"_"+mi.name+"(as:state_"+mi.name+"_all):state_"+mi.name+"_all=\n")
+                if ci.isArrayed:
+                    #the calc now becomes the inner-most internal function to be called by partial application
+                    off.write("\tlet "+ci.name+"_arr"+str(ci.numDims))
+                    for ind in range(1,ci.numDims+1):#array index parameters
+                        off.write(" (i"+str(ind)+":i32) ")
+                    off.write(":f32=\n")
+                for l in ci.code:#loop through lines
+                    l=" "+l+" "
+                    if not ci.isArrayed:
+                        l=l.replace("return ","\tlet "+ci.name+"_res=")#final return for scalar function
+                    else:
+                        l=l.replace("return ","\tin ")#final return for array inner function
+                    for kt in mi.tableInfos.keys():#convert table name to name of main parameter
+                        l=re.sub("[\W]"+kt+"[\W]",lambda x:x.group()[0]+"table_"+kt+"_"+mi.name+x.group()[len(kt)+1:],l)
+                    for df in mi.dataFieldInfos.values():#add as.p. in front of data/derived fields
+                        if df.expression=="":
+                            l=re.sub("[\W]"+df.name+"[\W]",lambda x:x.group()[0]+"as.p."+df.name+x.group()[len(df.name)+1:],l)
+                        else:
+                            l=re.sub("[\W]"+df.name+"[\W]",lambda x:x.group()[0]+"as.der."+df.name+x.group()[len(df.name)+1:],l)
+                    l=re.sub("[\W]"+"t"+"[\W]",lambda x:"as.t",l)# t
+                    l=re.sub("[\W]"+"basisNum"+"[\W]",lambda x:"as.basisNum",l)#basis
+                    #other calcs
+                    for ph2 in mi.phases.values():
+                        for ci2 in ph2.values():
+                            #present time values
+                            if ci2.stores!=0:
+                                source="as.state_new."
+                            else:
+                                source="as.intermediate."
+                            l = re.sub("[\W]" + ci2.name + "[\W]",lambda x: x.group()[0] + source + ci2.name + x.group()[len(ci2.name) + 1:],l)
+                            #past values
+                            if ci2.stores!=-1:
+                                for past in range(1,ci2.stores+1):
+                                    l = re.sub("[\W]" + ci2.name+"__"+str(past) + "[\W]",lambda x: x.group()[0] + "as.state__"+str(past) +"."+ ci2.name + x.group()[len(ci2.name+"__"+str(past)) + 1:],l)
+                            else:
+                                for past in range(1,100):
+                                    l = re.sub("[\W]" + ci2.name + "__" + str(past) + "[\W]",lambda x: x.group()[0] + "as.state__999."  + ci2.name +"[as.t-"+str(past)+"]" +x.group()[len(ci2.name+"__"+str(past)) + 1:], l)
+                    off.write("\t"+l+nl)
+                if ci.isArrayed:#multi-level mappings for arrayed
+                    for ind in range(1,ci.numDims):#loop over map functions
+                        off.write("let "+ci.name+"_arr"+str(ci.numDims-ind))
+                        for ind2 in range(1,ci.numDims-ind+1):#loop over parameters of a map function
+                            off.write(" (i"+str(ind2)+":i32) ")
+                        off.write(":"+multiBracket[ind]+"f32=map ("+ci.name+"_arr"+str(ci.numDims-ind+1)+" " )#partial application of previous mapping function
+                        for ind2 in range(1,ci.numDims-ind+1):#partial application (2)
+                            off.write(" i"+str(ind2)+" ")
+                        off.write(") (iota "+str(ci.dimSizes[ci.numDims-ind])+") \n")#the iota to which we apply the partial application
+                    off.write("let "+ci.name+"_res=map "+ci.name+"_arr1 (iota "+str(ci.dimSizes[0])+")\n")
+                if ci.stores!=0:#final result (this is the same variable regardless of whether or not the calc is arrayed
+                    off.write("\nin as with state_new."+ci.name+"="+ci.name+"_res"+nl)
+                else:
+                    off.write("\nin as with intermediate."+ci.name+"="+ci.name+"_res"+nl)
+
+#"force-all" calculation
+for mi in modelInfos.values():
+    off.write("\nlet forceTheIssue_"+mi.name+"(as:state_"+mi.name+"_all):state_"+mi.name+"_all=\n")
+    off.write("\tas with forceTheIssue=")
+    forceCode=""
+    plus=""
+    for ph in mi.phases.values():
+        for ci in ph.values():
+            if ci.isCall:
+                continue
+            if mi.forceThese==["all"] or mi.forceThese.__contains(ci.name):
+                elt=ci.name
+                if ci.stores==0:
+                    elt="as.intermediate."+elt
+                else:
+                    elt="as.state_new."+elt
+                if ci.numDims==1:
+                    elt="(sum1 "+elt+")"
+                if ci.numDims==2:
+                    elt="(sum2 "+elt+")"
+                if ci.type!="real":
+                    elt="(real "+elt+")"
+                forceCode+=plus+elt
+                plus="+"
+    off.write(forceCode+nl)
+
+#run one period for each phase (this is where we order)
+for mi in modelInfos.values():
+    for (phName,ph) in mi.phases.items():
+        off.write("\nlet runOnePeriod_"+mi.name+"_"+phName+"(as:state_"+mi.name+"_all):state_"+mi.name+"_all=\n\tas ")
+        whoCallsWhom={}
+        for ci in ph.values():
+            iCall=[]
+            for ci2 in ph.values():
+                found=False
+                for l in ci.code:
+                    for mtch in re.finditer("[\W]"+ci2.name+"[\W]"," "+l+" "):
+                        found=True
+                if found:
+                    iCall.append(ci2.name)
+            whoCallsWhom[ci.name]=iCall
+        while whoCallsWhom!={}:
+            for (caller,callees) in whoCallsWhom.items():
+                if callees==[]:#first calc with no ancestors
+                    off.write(" |> "+caller+"_"+mi.name)
+                    for l in whoCallsWhom.values():#remove this
+                        if l.__contains__(caller):
+                            l.remove(caller)
+                    del whoCallsWhom[caller]
+                    break
+    off.write(" |> forceTheIssue_"+mi.name+"\n\n")#only do this on final phase
+
+#storage
+for mi in modelInfos.values():
+    off.write("let store_"+mi.name+"(as:state_"+mi.name+"_all):state_"+mi.name+"_all=\n")
+    #store-alls: the method used (in the absence of in-place updates) is to copy the exisitng array and in-place that
+    st999="state__999={"
+    comma=""
+    for ph in mi.phases.values():
+        for ci in ph.values():
+            if ci.stores==-1:
+                off.write("\tlet z_"+ci.name+"__new=copy as.state__999."+ci.name+nl)
+                off.write("\tlet "+ci.name+"__new = update z_"+ci.name+"__new as.t as.state_new."+ci.name+nl)
+                st999+=comma+ci.name+"="+ci.name+"__new"
+                comma=","
+    st999+="}"
+    off.write("\tin\n\t{")
+    off.write("\n\tp=as.p,\n")
+    off.write("\tder=as.der,\n")
+    off.write("\tbasisNum=as.basisNum,\n")
+    off.write("\tt=as.t+1,\n")
+    off.write("\tstate__1 = as.state_new,\n")
+    off.write("\tstate_new = as.state_new,\n")
+    off.write("\tintermediate = as.intermediate,\n")
+    off.write("\t"+st999+","+nl)
+    off.write("\tforceTheIssue=as.forceTheIssue*0.001,\n")
+    for past in range(2,ci.maxStored+1):
+        comma = ""
+        st_n = "state__"+str(past)+"={"
+        for ph in mi.phases.values():
+            for ci in ph.values():
+                if ci.stores>=past:
+                    st_n+=comma+ci.name+"=as.state__"+str(past-1)+"."+ci.name
+                    comma=","
+        st_n += "}"
+        off.write("\t" + st_n + nl)
+    off.write("\t}\n")
+
 
 #closure
 off.write("in [[0]]")#temporary return value

@@ -3,7 +3,8 @@ let real(x:i32):f32=f32.i32(x)
 let exp(x:f32):f32=f32.exp(x)
 let sqrt(x:f32):f32=f32.sqrt(x)
 let log(x:f32):f32=f32.log(x)
-let sum(x:[]f32):f32=reduce (+) 0f32 x
+let sum1(x:[]f32):f32=reduce (+) 0f32 x
+let sum2(x:[][]f32):f32=reduce (+) 0f32 (map sum1 x)
 let prod(x:[]f32):f32=reduce (*) 1f32 x
 
 --constants
