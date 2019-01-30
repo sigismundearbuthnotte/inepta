@@ -66,8 +66,10 @@ class calcInfoObject:
         self.storedForExperience=False
         self.code=[]
         self.initialisation=""
+        self.skipCondition=""
         self.isCall=False
         self.outputMe=False
+        self.usedForRebasing=False
 
 class tableInfoObject:
     def __init__(self):
@@ -107,6 +109,7 @@ def newscap(l,splits):
 
 #start generating Futhark
 numBases=0
+numRebased=0
 off=open(exeSubDir+"/"+"futhark.fut",'w')
 
 def readBasicModelInfo(mfn):
@@ -137,9 +140,11 @@ def readBasicModelInfo(mfn):
                         (ll,_,_)=nwscap(ls[i+1],"[]")
                         ci.isArrayed=True
                         ci.numDims=len(ll)
-                        ci.dimSizes=[(lambda x: int(x) if x.isnumeric() else numBases)(lll) for lll in ll]
+                        ci.dimSizes=[(lambda x: int(x) if x.isnumeric() else (numBases if not ci.usedForRebasing else numRebased))(lll) for lll in ll]
                     if lsu[i]=="TYPE":
                         ci.type=ls[i+1]
+                    if  lsu[i]=="REBASE":
+                        ci.usedForRebasing=True
                 continue
             if section=="BASIC":
                 if lsu[0]=="NAME":
@@ -182,8 +187,10 @@ def readBasicModelInfo(mfn):
                     currPhase[ls[0]] = ci
                     ci.stores=-2
                     continue
-                if lsu[0]=="INITIALISE":
+                elif lsu[0]=="INITIALISE":
                     ci.initialisation=l
+                elif lsu[0]=="SKIP":
+                    ci.skipCondition=l[l.find("=")+1:]
                 else:
                     if firstLine:
                         firstLine=False
@@ -242,12 +249,14 @@ for l in ift.readlines():
             if lsu[0]=="MODE":
                 isDependent=lsu[1]=="DEPENDENT"
         if section=="MODELS":
-            modelInfos[lsu[0]]=readBasicModelInfo(modelSubDir + "/" + ls[0] + ".model")
+            modelInfos[ls[0]]=readBasicModelInfo(modelSubDir + "/" + ls[0] + ".model")
         if section=="BASES":
             numBases+=1
             bases[ls[0]]=False
             if len(ls)>2:
                 bases[ls[0]]=(lsu[2]=="TRUE")
+            if bases[ls[0]]:
+               numRebased+=1
         if section=="REBASING":
             rebaseTimes=ls
 
@@ -260,7 +269,7 @@ for k in bases.keys():
     comma=","
 doRebase+="]"
 off.write("let doRebase="+doRebase+nl)
-off.write("let rebaseTimes=["+",".join(rebaseTimes)+"]"+nl)
+off.write("let rebaseTimes:[]i32=["+",".join(rebaseTimes)+"]"+nl)
 
 #read enum info
 ift = open(modelSubDir + "/" + "enums", 'r')
@@ -597,6 +606,8 @@ if not isDependent:#integer parameters
 else:
     mainParams=" (numPeriods:i32) (numIters:i32) "
 off.write("let main "+mainParams)
+if hasESG:
+    off.write(" (scensData:[][][]f32) ")
 for mi in modelInfos.values():#data files
     if mi.hasData:
         off.write("(fileDataInt_"+mi.name+":[numPols][]i32) (fileDataReal_"+mi.name+":[numPols][]f32)")
@@ -608,6 +619,9 @@ for mi in modelInfos.values():#tables
 off.write(":[][]f32="+nl)
 
 off.write("\nunsafe\n\n")
+
+#convert scenarios
+off.write("let scens=scensFromArrays scensData"+nl)
 
 #derived setting functions (inside main because they might use tables)
 for mi in modelInfos.values():
@@ -631,7 +645,7 @@ for mi in modelInfos.values():
 off.write(nl)
 for mi in modelInfos.values():
     if mi.hasData:
-        off.write("let data_"+mi.name+"=dataFromArrays_"+mi.name+" fileDataInt_"+mi.name+" fileDataReal_"+mi.name+nl)
+        off.write("let fileData_"+mi.name+"=dataFromArrays_"+mi.name+" fileDataInt_"+mi.name+" fileDataReal_"+mi.name+nl)
 
 #get derived
 for mi in modelInfos.values():
@@ -683,6 +697,17 @@ for mi in modelInfos.values():
                 comma=","
     off.write("}\n\n")
 
+#enums for calcs stored for experience
+count=-1
+off.write(nl)
+for mi in modelInfos.values():
+    for ph in mi.phases.values():
+        for ci in ph.values():
+            if ci.storedForExperience:
+                count+=1
+                off.write("let basis__"+ci.name+"_"+mi.name+"="+str(count)+nl)
+off.write(nl)
+
 #generate calculations - append model name to name to avoid clashes
 #main effort here is to pull past values out of the correct bit of the all-state
 #TODO not done:
@@ -694,14 +719,24 @@ for mi in modelInfos.values():
     for ph in mi.phases.values():
         for ci in ph.values():
             if not ci.isCall:
-                off.write("let "+ci.name+"_"+mi.name+"(as:state_"+mi.name+"_all):state_"+mi.name+"_all=\n")
+                off.write("let "+ci.name+"_"+mi.name+"(as:(state_"+mi.name+"_all,[][][]f32)):(state_"+mi.name+"_all,[][][]f32)=\n")
+                off.write("\tlet asTemp=as.1 in"+nl)
+                off.write("\tlet basisValues=as.2 in"+nl)
                 if ci.isArrayed:
                     #the calc now becomes the inner-most internal function to be called by partial application
                     off.write("\tlet "+ci.name+"_arr"+str(ci.numDims))
                     for ind in range(1,ci.numDims+1):#array index parameters
                         off.write(" (i"+str(ind)+":i32) ")
                     off.write(":f32=\n")
-                for l in ci.code:#loop through lines
+                code=ci.code.copy()
+                if ci.skipCondition!="":
+                    condLine="if "+ci.skipCondition+" then "
+                    if not ci.isArrayed:#not arrayed: pass entire state through unchanged
+                        condLine+="as else \n"
+                    else:
+                        condLine+="0 else \n"#arrayed so calc is in the inner-most function - here we'll return 0
+                    code.insert(0,condLine)
+                for l in code:#loop through lines
                     l=" "+l+" "
                     l = re.sub("[a-zA-Z]\w*\s*=[^=]", lambda x: "let " + x.group(), l)  # let in front of binding
                     l = convUserFn(l)#format of calls to user-defined functions
@@ -711,33 +746,36 @@ for mi in modelInfos.values():
                         else:
                             l=l.replace("return ","\tlet ("+",".join(map(lambda x:x+"_res",ci.fieldsCalcd))+") = ")#final return for scalar function, returns tuple
                     else:
-                        l=l.replace("return ","\tin ")#final return for array inner function
+                        if len(ci.code)>1:
+                            l=l.replace("return ","\tin ")#final return for array inner function
+                        else:
+                            l = l.replace("return ", "")  # final return for array inner function
                     for kt in mi.tableInfos.keys():#convert table name to name of main parameter
                         l=re.sub("[\W]"+kt+"[\W]",lambda x:x.group()[0]+"table_"+kt+"_"+mi.name+x.group()[len(kt)+1:],l)
                     for df in mi.dataFieldInfos.values():#add as.p. in front of data/derived fields
                         if df.expression=="":
-                            l=re.sub("[\W]"+df.name+"[\W]",lambda x:x.group()[0]+"as.p."+df.name+x.group()[len(df.name)+1:],l)
+                            l=re.sub("[\W]"+df.name+"[\W]",lambda x:x.group()[0]+"asTemp.p."+df.name+x.group()[len(df.name)+1:],l)
                         else:
-                            l=re.sub("[\W]"+df.name+"[\W]",lambda x:x.group()[0]+"as.der."+df.name+x.group()[len(df.name)+1:],l)
-                    l=re.sub("[\W]"+"t"+"[\W]",lambda x:"as.t",l)# t
-                    l=re.sub("[\W]"+"basisNum"+"[\W]",lambda x:"as.basisNum",l)#basis
+                            l=re.sub("[\W]"+df.name+"[\W]",lambda x:x.group()[0]+"asTemp.der."+df.name+x.group()[len(df.name)+1:],l)
+                    l=re.sub("[\W]"+"t"+"[\W]",lambda x:x.group()[0]+"asTemp.t"+x.group()[2:],l)# t
+                    l=re.sub("[\W]"+"basisNum"+"[\W]",lambda x:x.group()[0]+"asTemp.basisNum"+x.group()[9:],l)#basis
                     #other calcs
                     for ph2 in mi.phases.values():
                         for ci2 in ph2.values():
                             #present time values
                             if ci2.stores!=0:
-                                source="as.state_new."
+                                source="asTemp.state_new."
                             else:
-                                source="as.intermediate."
+                                source="asTemp.intermediate."
                             for fld in ci2.fieldsCalcd:
                                 l = re.sub("[\W]" + fld + "[\W]",lambda x: x.group()[0] + source + fld + x.group()[len(fld) + 1:],l)
                             #past values
                             if ci2.stores!=-1:
                                 for past in range(1,ci2.stores+1):
-                                    l = re.sub("[\W]" + ci2.name+"__"+str(past) + "[\W]",lambda x: x.group()[0] + "as.state__"+str(past) +"."+ ci2.name + x.group()[len(ci2.name+"__"+str(past)) + 1:],l)
+                                    l = re.sub("[\W]" + ci2.name+"__"+str(past) + "[\W]",lambda x: x.group()[0] + "asTemp.state__"+str(past) +"."+ ci2.name + x.group()[len(ci2.name+"__"+str(past)) + 1:],l)
                             else:
                                 for past in range(1,100):
-                                    l = re.sub("[\W]" + ci2.name + "__" + str(past) + "[\W]",lambda x: x.group()[0] + "as.state__999."  + ci2.name +"[as.t-"+str(past)+"]" +x.group()[len(ci2.name+"__"+str(past)) + 1:], l)
+                                    l = re.sub("[\W]" + ci2.name + "__" + str(past) + "[\W]",lambda x: x.group()[0] + "asTemp.state__999."  + ci2.name +"[asTemp.t-"+str(past)+"]" +x.group()[len(ci2.name+"__"+str(past)) + 1:], l)
                     off.write("\t"+l+nl)
                 if ci.isArrayed:#multi-level mappings for arrayed
                     for ind in range(1,ci.numDims):#loop over map functions
@@ -750,23 +788,24 @@ for mi in modelInfos.values():
                         off.write(") (iota "+str(ci.dimSizes[ci.numDims-ind])+") \n")#the iota to which we apply the partial application
                     off.write("let "+ci.name+"_res=map "+ci.name+"_arr1 (iota "+str(ci.dimSizes[0])+")\n")
                 if ci.stores!=0:#final result (this is the same variable regardless of whether or not the calc is arrayed
-                    off.write("\nin as with state_new."+ci.name+"="+ci.name+"_res"+nl)
+                    off.write("\nin (asTemp with state_new."+ci.name+"="+ci.name+"_res,as.2)"+nl)
                 else:
                     if len(ci.fieldsCalcd)==1:
-                        off.write("\nin as with intermediate."+ci.name+"="+ci.name+"_res"+nl)#not tuple
+                        off.write("\nin (asTemp with intermediate."+ci.name+"="+ci.name+"_res,as.2)"+nl)#not tuple
                     else:
-                        prevas=""
+                        prevas=".1"
                         for fldi in range(0,len(ci.fieldsCalcd)-1):#tuple, stages of changing as
                             fld=ci.fieldsCalcd[fldi]
                             off.write("\nlet as"+str(fldi)+"=as"+prevas+" with intermediate." + fld + "=" + fld + "_res" + nl)
                             prevas=str(fldi)
                         fld=ci.fieldsCalcd[len(ci.fieldsCalcd)-1]
-                        off.write("\nin as"+prevas+" with intermediate."+fld+"="+fld+"_res"+nl)#final alteration to as
+                        off.write("\nin (as"+prevas+" with intermediate."+fld+"="+fld+"_res,as.2)"+nl)#final alteration to as
 
 #"force-all" calculation
 for mi in modelInfos.values():
-    off.write("\nlet forceTheIssue_"+mi.name+"(as:state_"+mi.name+"_all):state_"+mi.name+"_all=\n")
-    off.write("\tas with forceTheIssue=")
+    off.write("\nlet forceTheIssue_"+mi.name+"(as:(state_"+mi.name+"_all,[][][]f32)):(state_"+mi.name+"_all,[][][]f32)=\n")
+    off.write("\tlet asTemp=as.1 in\n")
+    off.write("\t(asTemp with forceTheIssue=")
     forceCode=""
     plus=""
     for ph in mi.phases.values():
@@ -776,9 +815,9 @@ for mi in modelInfos.values():
             if mi.forceThese==["all"] or mi.forceThese.__contains(ci.name):
                 for elt in ci.fieldsCalcd:
                     if ci.stores==0:
-                        elt="as.intermediate."+elt
+                        elt="asTemp.intermediate."+elt
                     else:
-                        elt="as.state_new."+elt
+                        elt="asTemp.state_new."+elt
                     if ci.numDims==1:
                         elt="(sum1 "+elt+")"
                     if ci.numDims==2:
@@ -787,14 +826,19 @@ for mi in modelInfos.values():
                         elt="(real "+elt+")"
                     forceCode+=plus+elt
                     plus="+"
-    off.write(forceCode+nl)
+    off.write(forceCode+",as.2)"+nl)
 
 #run one period for each phase (this is where we order)
 for mi in modelInfos.values():
+    count=0
     for (phName,ph) in mi.phases.items():
-        off.write("\nlet runOnePeriod_"+mi.name+"_"+phName+"(as:state_"+mi.name+"_all):state_"+mi.name+"_all=\n\tas ")
+        count+=1
+        off.write("\nlet runOnePeriod_"+mi.name+"_"+phName+"(as:(state_"+mi.name+"_all,[][][]f32)):(state_"+mi.name+"_all,[][][]f32)=\n")
+        off.write("\tlet asNew=as ")
         whoCallsWhom={}
         for ci in ph.values():
+            if ci.usedForRebasing:#these are applied in rebasing calcs and so do not enter the normal pipeline
+                continue
             iCall=[]
             for ci2 in ph.values():#does ci use ci2?
                 found = False
@@ -814,11 +858,15 @@ for mi in modelInfos.values():
                             l.remove(caller)
                     del whoCallsWhom[caller]
                     break
-    off.write(" |> forceTheIssue_"+mi.name+"\n\n")#only do this on final phase
+        if count<mi.phases.__len__():
+            off.write("\n\tin asNew"+nl)
+        else:
+            off.write(" |> forceTheIssue_"+mi.name+nl)
+            off.write("\tin asNew"+nl)
 
 #storage
 for mi in modelInfos.values():
-    off.write("let store_"+mi.name+"(as:state_"+mi.name+"_all):state_"+mi.name+"_all=\n")
+    off.write("\nlet store_"+mi.name+"(as:(state_"+mi.name+"_all,[][][]f32)):(state_"+mi.name+"_all,[][][]f32)=\n")
     #store-alls: the method used (in the absence of in-place updates) is to copy the exisitng array and in-place that
     if mi.haveAll:
         st999="state__999={"
@@ -826,36 +874,36 @@ for mi in modelInfos.values():
         for ph in mi.phases.values():
             for ci in ph.values():
                 if ci.stores==-1:
-                    off.write("\tlet z_"+ci.name+"__new=copy as.state__999."+ci.name+nl)
-                    off.write("\tlet "+ci.name+"__new = update z_"+ci.name+"__new as.t as.state_new."+ci.name+nl)
+                    off.write("\tlet z_"+ci.name+"__new=copy as.1.state__999."+ci.name+nl)
+                    off.write("\tlet "+ci.name+"__new = update z_"+ci.name+"__new as.1.t as.1.state_new."+ci.name+nl)
                     st999+=comma+ci.name+"="+ci.name+"__new"
                     comma=","
         st999+="}"
-    off.write("\tin\n\t{")
+    off.write("\tin(\n\t{")
     if mi.hasData:
-        off.write("\n\tp=as.p,\n")
+        off.write("\n\tp=as.1.p,\n")
     if mi.hasDerived:
-        off.write("\tder=as.der,\n")
-    off.write("\tbasisNum=as.basisNum,\n")
-    off.write("\tt=as.t+1,\n")
-    off.write("\tstate__1 = as.state_new,\n")
-    off.write("\tstate_new = as.state_new,\n")
+        off.write("\tder=as.1.der,\n")
+    off.write("\tbasisNum=as.1.basisNum,\n")
+    off.write("\tt=as.1.t+1,\n")
+    off.write("\tstate__1 = as.1.state_new,\n")
+    off.write("\tstate_new = as.1.state_new,\n")
     if mi.have0:
-        off.write("\tintermediate = as.intermediate,\n")
+        off.write("\tintermediate = as.1.intermediate,\n")
     if mi.haveAll:
         off.write("\t"+st999+","+nl)
-    off.write("\tforceTheIssue=as.forceTheIssue*0.001,\n")
+    off.write("\tforceTheIssue=as.1.forceTheIssue*0.001,\n")
     for past in range(2,mi.maxStored+1):
         comma = ""
         st_n = "state__"+str(past)+"={"
         for ph in mi.phases.values():
             for ci in ph.values():
                 if ci.stores>=past:
-                    st_n+=comma+ci.name+"=as.state__"+str(past-1)+"."+ci.name
+                    st_n+=comma+ci.name+"=as.1.state__"+str(past-1)+"."+ci.name
                     comma=","
         st_n += "}"
         off.write("\t" + st_n + nl)
-    off.write("\t}\n")
+    off.write("\t},as.2)\n")
 
 #Functions to actually run stuff
 for mi in modelInfos.values():
@@ -865,16 +913,38 @@ for mi in modelInfos.values():
     #function to run a single basis and get results (=vector of vectors item x time)
     off.write("\nlet runOneBasisFromOneTime_"+mi.name+" (as: state_"+mi.name+"_all)"+" (fromTime:i32 ) (bn:i32):[][]f32=")
     off.write("\n\tlet as2=as with basisNum=bn")
-    off.write("\n\tlet final_all_state = (runNPeriods_"+mi.name+"_phase1 (as.p."+mi.termField+"-fromTime+1i32))  as2")
+    off.write("\n\tlet final_all_state = (runNPeriods_"+mi.name+"_phase1 (as.p."+mi.termField+"-fromTime+1i32))  (as2,[])")#the [][][]f32 is empty as we are not running experience
     off.write("\n\tlet res:[][]f32=")
     concat=""
+    numForExperience=0
     for ph in mi.phases.values():
         for ci in ph.values():
             if ci.storedForExperience:
-                off.write(concat+"[final_all_state.state__999."+ci.name+"]")
+                off.write(concat+"[final_all_state.1.state__999."+ci.name+"]")
+                numForExperience+=1
                 concat="++"
         break
     off.write("\n\t in res\n")
+
+    #run with rebasing
+    off.write("let rebasedBases=map (numNonRebased+) (iota numRebased)"+nl)
+    off.write("\nlet rbtrue=replicate (length rebaseTimes) true"+nl)
+    off.write("let rbts:*[]bool = replicate numPeriods"+" false "+nl)
+    off.write("let isRebaseTime:*[]bool=scatter rbts rebaseTimes rbtrue\n")
+    off.write("\nlet calcRebasedResults_"+mi.name+"(as:(state_"+mi.name+"_all,[][][]f32)):(state_"+mi.name+"_all,[][][]f32)="+nl)
+    off.write("\tlet rebasedResults=\n")
+    off.write("\t\tif isRebaseTime[as.1.t] then\n")
+    off.write("\t\t\t(map (runOneBasisFromOneTime_"+mi.name+" as (as.1.t)) rebasedBases)\n")
+    off.write("\t\telse\n")
+    off.write("\t\t\t(zeros3 numRebased "+str(numForExperience)+" numPeriods)"+nl)
+    off.write("\tlet asPreRebase=(as.1,rebasedResults)"+nl)
+    off.write("\tlet asWithRebasing=asPreRebase")
+    for ph in mi.phases.values():
+        for ci in ph.values():
+            if ci.usedForRebasing:
+                off.write("|> "+ci.name)
+    off.write("\n\tin (asWithRebasing.1,as.2)")#calculate state based on rebased results but pass on the original non-rebased results
+    off.write("\nlet runNPeriodsWithRebasing_"+mi.name+" (n:i32) = iterate n (runOnePeriod_"+mi.name+"_phase1 >-> store_"+mi.name+">->calcRebasedResults_"+mi.name+")"+nl)
 
     #main function for running a single policy (independent)
     #TODO - rebased!
@@ -949,8 +1019,23 @@ for mi in modelInfos.values():
     off.write("\t}"+nl)
 
     #run the non-rebased bases
-    off.write("\tlet nonRebasedResults:[][][]f32=map (runOneBasisFromOneTime_"+mi.name+" init_all_state 1) (map (1+) (iota (numNonRebased-1)))")
+    off.write("\tlet nonRebasedResults:[][][]f32=map (runOneBasisFromOneTime_"+mi.name+" init_all_state 1) (map (1+) (iota (numNonRebased-1)))"+nl)
+
+    #run experience basis (incl. rebasing)
+    off.write("\n\tlet experience_super_state = (runNPeriodsWithRebasing_"+mi.name+" (as.p."+mi.termField+"))  (init_all_state,nonRebasedResults)"+nl)
+    off.write("\tlet experience_state=experience_super_state.1"+nl)
+    off.write("\tlet res:[][]f32=")
+    plus=""
+    for ph in mi.phases.values():
+        for ci in ph.values():
+            if ci.outputMe:
+                off.write(plus+"[experience_state.state__999."+ci.name+"]")
+                plus="++"
+    off.write("\n\tin res"+nl)
 
 #closure
-off.write("in [[0]]")#temporary return value
+#todo will need a more sophisticated methodology here to avoid memory blowup e.g. extract certain periods
+model=list(modelInfos.keys())[0]#todo temporary
+off.write("let allPols=map2 (runOnePol_"+model+" scens[0]) fileData_"+model+" derived_"+model+nl)
+off.write("in reduce (+..+) (zeros2 "+str(numForExperience)+" numPeriods) allPols\n")
 off.close()

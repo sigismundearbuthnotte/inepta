@@ -6,6 +6,9 @@ let log(x:f32):f32=f32.log(x)
 let sum1(x:[]f32):f32=reduce (+) 0f32 x
 let sum2(x:[][]f32):f32=reduce (+) 0f32 (map sum1 x)
 let prod(x:[]f32):f32=reduce (*) 1f32 x
+let sumprod(x:[]f32,y:[]f32):f32=sum (map2 (*) x y )
+let cumsum(x:[]f32):[]f32=scan (+) 0 x
+let cumprod(x:[]f32):[]f32=scan (*) 1 x
 
 --constants
 let zeros1(s:i32):[]f32=
