@@ -38,6 +38,7 @@ class modelInfo(object):#persistent data for a model
         self.termField=""#which data field gives term o/s
         self.dataFieldInfos={}
         self.phases={}#indexed by name, returns dict of calcInfoObjects
+        self.phaseDirections={"phase0":"backwards","phase1":"forwards"}
         self.tableInfos={}
         self.hasData=False
         self.hasDerived=False
@@ -46,6 +47,8 @@ class modelInfo(object):#persistent data for a model
         self.maxStored=0#excluding alls
         self.haveAll=False
         self.have0=False
+        self.firstProjectionPeriod=1
+        self.commonCode=[]
 
 class dataFieldInfo(object):#covers derived fields as well
     def __init__(self):
@@ -146,6 +149,8 @@ def readBasicModelInfo(mfn):
                     if  lsu[i]=="REBASE":
                         ci.usedForRebasing=True
                 continue
+            if section=="COMMON":
+                mi.commonCode=mi.commonCode.__add__([l])
             if section=="BASIC":
                 if lsu[0]=="NAME":
                     mi.name=ls[1]
@@ -162,6 +167,8 @@ def readBasicModelInfo(mfn):
                     mi.startField=ls[1]
                 if lsu[0]=="FORCE":
                     mi.forceThese=ls[1:]
+                if lsu[0]=="FIRSTPROJECTIONPERIOD":
+                    mi.firstProjectionPeriod=int(ls[1])
             if section == "DATA" or section == "DERIVED":
                 mi.hasData=True
                 df=dataFieldInfo()
@@ -180,6 +187,9 @@ def readBasicModelInfo(mfn):
                 if lsu[0]=="NAME":
                     currPhase={}
                     mi.phases[ls[1]]=currPhase#disc of calInfoObjects
+                    for ii in range(2,len(ls)):
+                        if lsu[ii]=="DIRECTION":
+                            mi.phaseDirections[ls[1]]=ls[ii+1]
             if section =="CALC":
                 if l[0:4]=="call":
                     ci.isCall=True
@@ -387,6 +397,10 @@ off.write(nl)
 for enum in enums.values():
     for (k,v) in enum.items():
         off.write("let "+k+":i32="+str(v)+nl)
+
+#other system constants
+for mi in modelInfos.values():
+    off.write("let firstProjectionPeriod=("+str(mi.firstProjectionPeriod)+")"+nl)
 
 #data types
 off.write(nl)
@@ -620,6 +634,15 @@ off.write(":[][]f32="+nl)
 
 off.write("\nunsafe\n\n")
 
+#common code - i.e outside calcs - can really access only tables
+for mi in modelInfos.values():
+    for l in mi.commonCode:
+        l = re.sub("[a-zA-Z]\w*\s*=[^=]", lambda x: "let " + x.group(), l)  # let in front of binding
+        l = convUserFn(l)  # format of calls to user-defined functions
+        for kt in mi.tableInfos.keys():  # convert table name to name of main parameter
+            l = re.sub("[\W]" + kt + "[\W]",lambda x: x.group()[0] + "table_" + kt + "_" + mi.name + x.group()[len(kt) + 1:], l)
+        off.write(l+nl)
+
 #convert scenarios
 off.write("let scens=scensFromArrays scensData"+nl)
 
@@ -650,7 +673,7 @@ for mi in modelInfos.values():
 #get derived
 for mi in modelInfos.values():
     if mi.hasDerived:
-        off.write("let derived_"+mi.name+"=map setDerived_"+mi.name+" data_"+mi.name+nl)
+        off.write("let derived_"+mi.name+"=map setDerived_"+mi.name+" fileData_"+mi.name+nl)
 
 #some constants for an independent run
 if not isDependent:
@@ -660,42 +683,68 @@ if not isDependent:
 
 #initialisation functions (local as need access to tables)
 for mi in modelInfos.values():
-    off.write("\nlet init_"+mi.name)
-    if mi.hasData:
-        off.write(" (d:data_"+mi.name+") ")
-    if mi.hasDerived:
-        off.write(" (der:derived_" + mi.name + ") ")
-    if hasESG:
-        off.write(" (scen:oneScen) ")
-    off.write(":state_"+mi.name+"=\n")
-    for ph in mi.phases.values():
-        for ci in ph.values():
-            if ci.stores>0 or ci.stores==-1:#only those in state
-                if ci.initialisation!="":
-                    pos=ci.initialisation.find("=")
-                    expr=ci.initialisation[pos+1:]
-                    expr=" "+expr+" "
-                    for kt in mi.tableInfos.keys():#convert table name to name of main parameter
-                        expr=re.sub("[\W]"+kt+"[\W]",lambda x:x.group()[0]+"table_"+kt+"_"+mi.name+x.group()[len(kt)+1:],expr)
-                    for df2 in mi.dataFieldInfos.values():#add d. in front of data fields or der. for derived
-                        if df2.expression=="":
-                            expr=re.sub("[\W]"+df2.name+"[\W]",lambda x:x.group()[0]+"d."+df2.name+x.group()[len(df2.name)+1:],expr)
+    count=0
+    for (phName,ph) in mi.phases.items():
+        count+=1
+        if mi.phaseDirections[phName]=="static":
+            continue
+        off.write("\nlet init_"+mi.name+"_"+phName)
+        if mi.hasData:
+            off.write(" (d:data_"+mi.name+") ")
+        if mi.hasDerived:
+            off.write(" (der:derived_" + mi.name + ") ")
+        if hasESG:
+            off.write(" (scen:oneScen) ")
+        if count>1:#if not first phase then bring in state from end of previous phase
+            off.write(" (stateFromLastPhase:state_"+mi.name+" ) ")
+        off.write(":state_"+mi.name+"=\n")
+        for (phName2, ph2) in mi.phases.items():#must mention all calcs (fom all phases)
+            for ci in ph2.values():
+                if ci.stores>0 or ci.stores==-1:#only those in state
+                    if ci.initialisation!="" and ph2 is ph:
+                        pos=ci.initialisation.find("=")
+                        expr=ci.initialisation[pos+1:]
+                        expr=" "+expr+" "
+                        for kt in mi.tableInfos.keys():#convert table name to name of main parameter
+                            expr=re.sub("[\W]"+kt+"[\W]",lambda x:x.group()[0]+"table_"+kt+"_"+mi.name+x.group()[len(kt)+1:],expr)
+                        for df2 in mi.dataFieldInfos.values():#add d. in front of data fields or der. for derived
+                            if df2.expression=="":
+                                expr=re.sub("[\W]"+df2.name+"[\W]",lambda x:x.group()[0]+"d."+df2.name+x.group()[len(df2.name)+1:],expr)
+                            else:
+                                expr=re.sub("[\W]"+df2.name+"[\W]",lambda x:x.group()[0]+"der."+df2.name+x.group()[len(df2.name)+1:],expr)
+                        for (phName3, ph3) in mi.phases.items():#3rd level (!) calc used in calc formula
+                            for ci3 in ph3.values():
+                                expr = re.sub("[\W]" + ci3.name + "[\W]",lambda x: x.group()[0] + "stateFromLastPhase." + ci3.name + x.group()[len(ci3.name) + 1:],expr)
+                        off.write("\tlet "+ci.name+"="+expr+nl)
+                    elif count == 1:  # zeroise on first phase only
+                        if ci.numDims == 0:
+                            off.write("\tlet " + ci.name + "=0\n")
                         else:
-                            expr=re.sub("[\W]"+df2.name+"[\W]",lambda x:x.group()[0]+"der."+df2.name+x.group()[len(df2.name)+1:],expr)
-                    off.write("\tlet "+ci.name+"="+expr+nl)
-                else:#zeroise
-                    if ci.numDims==0:
-                        off.write("\tlet "+ci.name+"=0\n")
-                    else:
-                        off.write("\tlet "+ ci.name+"=zeros"+str(ci.numDims)+" "+" ".join(map (str,ci.dimSizes))+nl)
-    off.write("\n\tin {")
-    comma=""
-    for ph in mi.phases.values():#compose the record
-        for ci in ph.values():
-            if ci.stores > 0 or ci.stores == -1:
-                off.write(comma+ci.name+"="+ci.name)
-                comma=","
-    off.write("}\n\n")
+                            off.write("\tlet " + ci.name + "=zeros" + str(ci.numDims) + " " + " ".join(
+                                map(str, ci.dimSizes)) + nl)
+                    else:#bring forward (even if it's not been calculated yet it'll have zeros from the first initialisation), this would not be nec. if I could do a multiple "with"
+                        off.write("let "+ci.name+"=stateFromLastPhase."+ci.name+nl)
+        off.write("\n\tin {")
+        comma=""
+        for ph in mi.phases.values():#compose the record
+            for ci in ph.values():
+                if ci.stores > 0 or ci.stores == -1:
+                    off.write(comma+ci.name+"="+ci.name)
+                    comma=","
+        off.write("}\n\n")
+        #also need initialisation of all-state for later phases
+        if count>1:
+            off.write("\nlet init_" + mi.name + "_" + phName+"_all")
+            if mi.hasData:
+                off.write(" (d:data_" + mi.name + ") ")
+            if mi.hasDerived:
+                off.write(" (der:derived_" + mi.name + ") ")
+            if hasESG:
+                off.write(" (scen:oneScen) ")
+            off.write(" (as:state_"+mi.name+"_all ) ="+nl)
+            off.write("\tlet state_bf= init_"+ mi.name + "_" + phName+" d der scen as.state_new\n")
+            off.write("\tlet as1= as with state_new=state_bf\n")
+            off.write("\tin as1 with state__1 = state_bf\n")
 
 #enums for calcs stored for experience
 count=-1
@@ -716,7 +765,7 @@ off.write(nl)
 #calls
 #variants
 for mi in modelInfos.values():
-    for ph in mi.phases.values():
+    for (phName,ph) in mi.phases.items():
         for ci in ph.values():
             if not ci.isCall:
                 off.write("let "+ci.name+"_"+mi.name+"(as:(state_"+mi.name+"_all,[][][]f32)):(state_"+mi.name+"_all,[][][]f32)=\n")
@@ -760,13 +809,16 @@ for mi in modelInfos.values():
                     l=re.sub("[\W]"+"t"+"[\W]",lambda x:x.group()[0]+"asTemp.t"+x.group()[2:],l)# t
                     l=re.sub("[\W]"+"basisNum"+"[\W]",lambda x:x.group()[0]+"asTemp.basisNum"+x.group()[9:],l)#basis
                     #other calcs
-                    for ph2 in mi.phases.values():
+                    for (phName2,ph2) in mi.phases.items():
                         for ci2 in ph2.values():
                             #present time values
-                            if ci2.stores!=0:
-                                source="asTemp.state_new."
+                            if mi.phaseDirections[phName]!="static":
+                                if ci2.stores!=0:
+                                    source="asTemp.state_new."
+                                else:
+                                    source="asTemp.intermediate."
                             else:
-                                source="asTemp.intermediate."
+                                source = "asTemp.state__999."#static phase, can only be whole array calcs, take entire array
                             for fld in ci2.fieldsCalcd:
                                 l = re.sub("[\W]" + fld + "[\W]",lambda x: x.group()[0] + source + fld + x.group()[len(fld) + 1:],l)
                             #past values
@@ -775,7 +827,7 @@ for mi in modelInfos.values():
                                     l = re.sub("[\W]" + ci2.name+"__"+str(past) + "[\W]",lambda x: x.group()[0] + "asTemp.state__"+str(past) +"."+ ci2.name + x.group()[len(ci2.name+"__"+str(past)) + 1:],l)
                             else:
                                 for past in range(1,100):
-                                    l = re.sub("[\W]" + ci2.name + "__" + str(past) + "[\W]",lambda x: x.group()[0] + "asTemp.state__999."  + ci2.name +"[asTemp.t-"+str(past)+"]" +x.group()[len(ci2.name+"__"+str(past)) + 1:], l)
+                                    l = re.sub("[\W]" + ci2.name + "__" + str(past) + "[\W]",lambda x: x.group()[0] + "asTemp.state__999."  + ci2.name +"[asTemp.t+firstProjectionPeriod-"+str(past)+"]" +x.group()[len(ci2.name+"__"+str(past)) + 1:], l)
                     off.write("\t"+l+nl)
                 if ci.isArrayed:#multi-level mappings for arrayed
                     for ind in range(1,ci.numDims):#loop over map functions
@@ -788,9 +840,12 @@ for mi in modelInfos.values():
                         off.write(") (iota "+str(ci.dimSizes[ci.numDims-ind])+") \n")#the iota to which we apply the partial application
                     off.write("let "+ci.name+"_res=map "+ci.name+"_arr1 (iota "+str(ci.dimSizes[0])+")\n")
                 if ci.stores!=0:#final result (this is the same variable regardless of whether or not the calc is arrayed
-                    off.write("\nin (asTemp with state_new."+ci.name+"="+ci.name+"_res,as.2)"+nl)
+                    if mi.phaseDirections[phName]!="static":
+                        off.write("\nin (asTemp with state_new."+ci.name+"="+ci.name+"_res,as.2)"+nl)
+                    else:
+                        off.write("\nin (asTemp with state__999."+ci.name+"="+ci.name+"_res,as.2)"+nl)
                 else:
-                    if len(ci.fieldsCalcd)==1:
+                    if len(ci.fieldsCalcd)==1:#storing, might or might not be a tuple
                         off.write("\nin (asTemp with intermediate."+ci.name+"="+ci.name+"_res,as.2)"+nl)#not tuple
                     else:
                         prevas=".1"
@@ -866,64 +921,77 @@ for mi in modelInfos.values():
 
 #storage
 for mi in modelInfos.values():
-    off.write("\nlet store_"+mi.name+"(as:(state_"+mi.name+"_all,[][][]f32)):(state_"+mi.name+"_all,[][][]f32)=\n")
-    #store-alls: the method used (in the absence of in-place updates) is to copy the exisitng array and in-place that
-    if mi.haveAll:
-        st999="state__999={"
-        comma=""
-        for ph in mi.phases.values():
-            for ci in ph.values():
-                if ci.stores==-1:
-                    off.write("\tlet z_"+ci.name+"__new=copy as.1.state__999."+ci.name+nl)
-                    off.write("\tlet "+ci.name+"__new = update z_"+ci.name+"__new as.1.t as.1.state_new."+ci.name+nl)
-                    st999+=comma+ci.name+"="+ci.name+"__new"
-                    comma=","
-        st999+="}"
-    off.write("\tin(\n\t{")
-    if mi.hasData:
-        off.write("\n\tp=as.1.p,\n")
-    if mi.hasDerived:
-        off.write("\tder=as.1.der,\n")
-    off.write("\tbasisNum=as.1.basisNum,\n")
-    off.write("\tt=as.1.t+1,\n")
-    off.write("\tstate__1 = as.1.state_new,\n")
-    off.write("\tstate_new = as.1.state_new,\n")
-    if mi.have0:
-        off.write("\tintermediate = as.1.intermediate,\n")
-    if mi.haveAll:
-        off.write("\t"+st999+","+nl)
-    off.write("\tforceTheIssue=as.1.forceTheIssue*0.001,\n")
-    for past in range(2,mi.maxStored+1):
-        comma = ""
-        st_n = "state__"+str(past)+"={"
-        for ph in mi.phases.values():
-            for ci in ph.values():
-                if ci.stores>=past:
-                    st_n+=comma+ci.name+"=as.1.state__"+str(past-1)+"."+ci.name
-                    comma=","
-        st_n += "}"
-        off.write("\t" + st_n + nl)
-    off.write("\t},as.2)\n")
+    for (phName,phx) in mi.phases.items():
+        if mi.phaseDirections[phName]=="static":#no need for storage at end of period if there are no periods
+            continue
+        off.write("\nlet store_"+mi.name+"_"+phName+"(as:(state_"+mi.name+"_all,[][][]f32)):(state_"+mi.name+"_all,[][][]f32)=\n")
+        #store-alls: the method used (in the absence of in-place updates) is to copy the exisitng array and in-place that
+        if mi.haveAll:
+            st999="state__999={"
+            comma=""
+            for ph in mi.phases.values():
+                for ci in ph.values():
+                    if ci.stores==-1:
+                        if ph is phx:#only do (possibly expensive) copying etc. if the store-all was actually in this phase
+                            off.write("\tlet z_"+ci.name+"__new=copy as.1.state__999."+ci.name+nl)
+                            off.write("\tlet "+ci.name+"__new = update z_"+ci.name+"__new (as.1.t+firstProjectionPeriod) as.1.state_new."+ci.name+nl)
+                            st999+=comma+ci.name+"="+ci.name+"__new"
+                        else:
+                            off.write("\tlet "+ci.name+"= as.1.state__999."+ci.name+nl)
+                            st999+=comma+ci.name+"="+ci.name
+                        comma = ","
+            st999+="}"
+        off.write("\tin(\n\t{")
+        if mi.hasData:
+            off.write("\n\tp=as.1.p,\n")
+        if mi.hasDerived:
+            off.write("\tder=as.1.der,\n")
+        off.write("\tbasisNum=as.1.basisNum,\n")
+        if mi.phaseDirections[phName]=="forwards":
+            off.write("\tt=as.1.t+1,\n")
+        else:
+            off.write("\tt=as.1.t-1,\n")
+        off.write("\tstate__1 = as.1.state_new,\n")
+        off.write("\tstate_new = as.1.state_new,\n")
+        if mi.have0:
+            off.write("\tintermediate = as.1.intermediate,\n")
+        if mi.haveAll:
+            off.write("\t"+st999+","+nl)
+        off.write("\tforceTheIssue=as.1.forceTheIssue*0.001,\n")
+        for past in range(2,mi.maxStored+1):
+            comma = ""
+            st_n = "state__"+str(past)+"={"
+            for ph in mi.phases.values():
+                for ci in ph.values():
+                    if ci.stores>=past:
+                        st_n+=comma+ci.name+"=as.1.state__"+str(past-1)+"."+ci.name
+                        comma=","
+            st_n += "}"
+            off.write("\t" + st_n + nl)
+        off.write("\t},as.2)\n")
 
 #Functions to actually run stuff
 for mi in modelInfos.values():
     #utility function to run phase 1 (only) n times (intended for running other bases)
-    off.write("\nlet runNPeriods_"+mi.name+"_phase1 (n:i32) = iterate n (runOnePeriod_"+mi.name+"_phase1 >-> store_"+mi.name+")"+nl)
+    for ph in mi.phases.keys():
+        if mi.phaseDirections[ph]!="static":
+            off.write("\nlet runNPeriods_"+mi.name+"_"+ph+" (n:i32) = iterate n (runOnePeriod_"+mi.name+"_"+ph+" >-> store_"+mi.name+"_"+ph+")"+nl)
 
-    #function to run a single basis and get results (=vector of vectors item x time)
+    #function to run a single basis (phase1 only) and get results (=vector of vectors item x time)
     off.write("\nlet runOneBasisFromOneTime_"+mi.name+" (as: state_"+mi.name+"_all)"+" (fromTime:i32 ) (bn:i32):[][]f32=")
     off.write("\n\tlet as2=as with basisNum=bn")
     off.write("\n\tlet final_all_state = (runNPeriods_"+mi.name+"_phase1 (as.p."+mi.termField+"-fromTime+1i32))  (as2,[])")#the [][][]f32 is empty as we are not running experience
     off.write("\n\tlet res:[][]f32=")
     concat=""
     numForExperience=0
-    for ph in mi.phases.values():
-        for ci in ph.values():
-            if ci.storedForExperience:
-                off.write(concat+"[final_all_state.1.state__999."+ci.name+"]")
-                numForExperience+=1
-                concat="++"
-        break
+    for (phName,ph) in mi.phases.items():
+        if phName=="phase1":
+            for ci in ph.values():
+                if ci.storedForExperience:
+                    off.write(concat+"[final_all_state.1.state__999."+ci.name+"]")
+                    numForExperience+=1
+                    concat="++"
+            break
     off.write("\n\t in res\n")
 
     #run with rebasing
@@ -932,19 +1000,20 @@ for mi in modelInfos.values():
     off.write("let rbts:*[]bool = replicate numPeriods"+" false "+nl)
     off.write("let isRebaseTime:*[]bool=scatter rbts rebaseTimes rbtrue\n")
     off.write("\nlet calcRebasedResults_"+mi.name+"(as:(state_"+mi.name+"_all,[][][]f32)):(state_"+mi.name+"_all,[][][]f32)="+nl)
-    off.write("\tlet rebasedResults=\n")
+    off.write("\tlet rebasedResults1=\n")
     off.write("\t\tif isRebaseTime[as.1.t] then\n")
-    off.write("\t\t\t(map (runOneBasisFromOneTime_"+mi.name+" as (as.1.t)) rebasedBases)\n")
+    off.write("\t\t\t(map (runOneBasisFromOneTime_"+mi.name+" as.1 (as.1.t)) rebasedBases)\n")
     off.write("\t\telse\n")
     off.write("\t\t\t(zeros3 numRebased "+str(numForExperience)+" numPeriods)"+nl)
+    off.write("\tlet rebasedResults=rebasedResults1[:,:,firstProjectionPeriod:]"+nl)#for basis results, make time start at 0 not firstProjectionPeriod so all references to basisValues can just use t
     off.write("\tlet asPreRebase=(as.1,rebasedResults)"+nl)
     off.write("\tlet asWithRebasing=asPreRebase")
     for ph in mi.phases.values():
         for ci in ph.values():
             if ci.usedForRebasing:
-                off.write("|> "+ci.name)
+                off.write("|> "+ci.name+"_"+mi.name)
     off.write("\n\tin (asWithRebasing.1,as.2)")#calculate state based on rebased results but pass on the original non-rebased results
-    off.write("\nlet runNPeriodsWithRebasing_"+mi.name+" (n:i32) = iterate n (runOnePeriod_"+mi.name+"_phase1 >-> store_"+mi.name+">->calcRebasedResults_"+mi.name+")"+nl)
+    off.write("\nlet runNPeriodsWithRebasing_"+mi.name+" (n:i32) = iterate n (runOnePeriod_"+mi.name+"_phase1 >-> store_"+mi.name+"_phase1 >->calcRebasedResults_"+mi.name+")"+nl)
 
     #main function for running a single policy (independent)
     #TODO - rebased!
@@ -958,17 +1027,21 @@ for mi in modelInfos.values():
         off.write("(der:derived_"+mi.name+")")
     off.write(":[][]f32 ="+nl)
 
-    #initial state
-    off.write("\tlet init_state = init_"+mi.name+" pol der scen\n")
+    #initial state from either phase0 or phase1 initialisation)
+    hasPhase0=mi.phases.keys().__contains__("phase0")
+    if hasPhase0:
+        off.write("\tlet init_state = init_"+mi.name+"_phase0 pol der scen\n")
+    else:
+        off.write("\tlet init_state = init_"+mi.name+"_phase1 pol der scen\n")
 
     #initial all-state
-    off.write("\tlet init_all_state:state_"+mi.name+"_all = {"+nl)
+    off.write("\tlet init_all_state"+("_prePhase0" if hasPhase0 else "")+":state_"+mi.name+"_all = {"+nl)
     off.write("\tp=pol,\n")
     if mi.hasDerived:
         off.write("\tder=der,\n")
     off.write("\tbasisNum=0,\n")
     off.write("\tforceTheIssue=0,\n")
-    off.write("\tt=1,\n")
+    off.write("\tt=("+("0" if hasPhase0 else "firstProjectionPeriod")+"),\n")
     off.write("\tstate_new=init_state,\n")
     off.write("\tstate__1=init_state,\n")
     if mi.have0:
@@ -1016,14 +1089,32 @@ for mi in modelInfos.values():
             off.write("\t},\n")
         else:
             off.write("\t}\n")
-    off.write("\t}"+nl)
+    off.write("\t}"+nl+nl)
+
+    #run phase0 (should it exist)
+    if hasPhase0:
+        off.write("\tlet init_all_state=(init_all_state_prePhase0,[])\n \t|> " + nl)
+        off.write("\t(runNPeriods_"+mi.name+"_phase0 (1-firstProjectionPeriod))\n\t|> (.1) |>\n")
+        off.write("\t(init_"+mi.name+"_phase1_all pol der scen"+")"+nl)
 
     #run the non-rebased bases
-    off.write("\tlet nonRebasedResults:[][][]f32=map (runOneBasisFromOneTime_"+mi.name+" init_all_state 1) (map (1+) (iota (numNonRebased-1)))"+nl)
+    off.write("\n\tlet nonRebasedResults1:[][][]f32=map (runOneBasisFromOneTime_"+mi.name+" init_all_state ("+str(mi.firstProjectionPeriod)+") ) (map (1+) (iota (numNonRebased-1)))"+nl)
+    off.write("\tlet nonRebasedResults=nonRebasedResults1[:,:,firstProjectionPeriod:]"+nl)#for basis results, make time start at 0 not firstProjectionPeriod so all references to basisValues can just use t
 
     #run experience basis (incl. rebasing)
-    off.write("\n\tlet experience_super_state = (runNPeriodsWithRebasing_"+mi.name+" (as.p."+mi.termField+"))  (init_all_state,nonRebasedResults)"+nl)
-    off.write("\tlet experience_state=experience_super_state.1"+nl)
+    off.write("\n\tlet experience_super_state = (init_all_state,nonRebasedResults) |> (runNPeriodsWithRebasing_"+mi.name+" (pol."+mi.termField+"))  "+nl)
+    #run later phases for experience
+    for (phName,ph) in mi.phases.items():
+        if phName=="phase1" or phName=="phase0":#do not do the first phases
+            continue
+        off.write("\t|>\n")
+        if mi.phaseDirections[phName]!="static":
+            off.write("\t(\(x:state_"+mi.name+"_all,y:[][][]f32)->(((init_"+mi.name+"_"+phName+"_all pol der scen ) x),y))\n\t|>\n")#pipe into phase initialisation
+        if mi.phaseDirections[phName]!="static":
+            off.write("\t(runNPeriods_"+mi.name+"_"+phName+" pol."+mi.termField+")"+nl)#pipe into next phase
+        else:
+            off.write("\trunOnePeriod_"+mi.name+"_"+phName+nl)#pipe into next phase
+    off.write("\tlet experience_state=experience_super_state.1"+nl)#get output results for experience
     off.write("\tlet res:[][]f32=")
     plus=""
     for ph in mi.phases.values():
@@ -1039,3 +1130,50 @@ model=list(modelInfos.keys())[0]#todo temporary
 off.write("let allPols=map2 (runOnePol_"+model+" scens[0]) fileData_"+model+" derived_"+model+nl)
 off.write("in reduce (+..+) (zeros2 "+str(numForExperience)+" numPeriods) allPols\n")
 off.close()
+
+#call Futhark .c file
+ofc=open(exeSubDir+"/"+"call_futhark.c",'w')
+
+#includes: standard
+
+#includes: futhark and reading routines
+
+#command line arguments
+
+#get context and config
+
+#declare c table arrays
+
+#declare c data arrays
+
+#declare c ESG arrays
+
+#read tables and get size information, this amalgamates all bases into one big table
+
+#declare futhark table arrays
+
+#declare futhark data arrays
+
+#declare futhark ESG arrays
+
+#convert table arrays: c to futhark
+
+#call futhark
+
+#get results from futhark
+
+#free c table arrays
+
+#free futhark table arrays
+
+#free c data arrays
+
+#free futhark data arrays
+
+#free c ESG arrays
+
+#free futhark ESG arrays
+
+#free context
+
+#output results to file
