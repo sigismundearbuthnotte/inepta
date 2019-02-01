@@ -14,6 +14,7 @@ for i in range(1,100):
 
 #subdirs
 rootSubDir=sys.argv[1]
+dataSubDir=rootSubDir+"/data"
 tablesSubDir=rootSubDir+"/tables"#base subdirectory for tables
 modelSubDir=rootSubDir+"/models"
 exeSubDir=rootSubDir+"/exe"
@@ -48,6 +49,7 @@ class modelInfo(object):#persistent data for a model
         self.haveAll=False
         self.have0=False
         self.firstProjectionPeriod=1
+        self.lastProjectionPeriod=600
         self.commonCode=[]
 
 class dataFieldInfo(object):#covers derived fields as well
@@ -169,6 +171,8 @@ def readBasicModelInfo(mfn):
                     mi.forceThese=ls[1:]
                 if lsu[0]=="FIRSTPROJECTIONPERIOD":
                     mi.firstProjectionPeriod=int(ls[1])
+                if lsu[0] == "LASTPROJECTIONPERIOD":
+                    mi.lastProjectionPeriod = int(ls[1])
             if section == "DATA" or section == "DERIVED":
                 mi.hasData=True
                 df=dataFieldInfo()
@@ -1135,45 +1139,190 @@ off.close()
 ofc=open(exeSubDir+"/"+"call_futhark.c",'w')
 
 #includes: standard
+ofc.write("#include <stdio.h>"+nl)
+ofc.write("#include <stdlib.h>"+nl)
+ofc.write("#include <stdbool.h>"+nl)
+ofc.write("#include <string.h>"+nl)
+ofc.write("#include <time.h>"+nl)
 
 #includes: futhark and reading routines
+ofc.write("#include \"futhark.h\""+nl)
+ofc.write("#include \"reading.h\""+nl)
 
-#command line arguments
+#main and command line arguments
+ofc.write("\nint main(int argc, char *argv[])"+nl)
+ofc.write("{"+nl)
 
 #get context and config
+ofc.write(nl)
+ofc.write("struct futhark_context_config * cfg = futhark_context_config_new()"+nl);
+ofc.write("struct futhark_context * ctx = futhark_context_new(cfg);"+nl)
 
 #declare c table arrays
+ofc.write("\nfloat ")
+comma=""
+for mi in modelInfos.values():
+    for (k,t) in mi.tableInfos.items():
+        ofc.write(comma+"*table_"+mi.name+"_"+k)
+        comma=","
+ofc.write(";"+nl)
 
-#declare c data arrays
+#declare c data arrays (int)
+ofc.write("\nint ")
+comma=""
+for mi in modelInfos.values():
+    if mi.hasData:
+        ofc.write(comma+"*fileDataInt_"+mi.name)
+        comma=","
+ofc.write(";"+nl)
+ofc.write("\nfloat ")
+#now float
+comma = ""
+for mi in modelInfos.values():
+    if mi.hasData:
+        ofc.write(comma + "*fileDataReal_" + mi.name)
+        comma = ","
+ofc.write(";" + nl)
 
 #declare c ESG arrays
+#todo
 
 #read tables and get size information, this amalgamates all bases into one big table
+basisToNum={"SINGLE":1,"PREFIX":2,"SUFFIX":3,"SUBDIR":4}
+ofc.write("int err;\n")
+ofc.write("char *basisNames["+str(len(bases))+"]={")
+comma=""
+for basis in bases:
+    ofc.write(comma+"\""+basis+"\"")
+    comma=","
+ofc.write("};\n")
+for mi in modelInfos.values():
+    for (k,t) in mi.tableInfos.items():
+        comma=""
+        ofc.write("int dimSizes_"+mi.name+"_"+k+"["+str(len(t.dims))+"]={")
+        for e in t.dims:
+            if e=="int":
+                ofc.write(comma+"-1")
+            else:
+                ofc.write(comma+str(enums[e].__len__()))
+            comma=","
+        ofc.write("};\n")
+        ofc.write("err=readTable(\""+tablesSubDir+"/"+k+"\",\"\","+str(len(t.dims))+",dimSizes_"+mi.name+"_"+k+","+str(numBases)+",basisNames,"+str(basisToNum[t.basis])+","+"&table_"+mi.name+"_"+k+");"+nl)
 
-#declare futhark table arrays
+#create futhark table arrays
+tables=[]
+for mi in modelInfos.values():
+    for (k,t) in mi.tableInfos.items():
+        ofc.write("struct futhark_f32_"+str(1+len(t.dims))+"d *fut_"+"table_"+mi.name+"_"+k+"=futhark_new_f32_"+str(1+len(t.dims))+"d(ctx,"+"table_"+mi.name+"_"+k+","+str(numBases)+",")
+        tables=tables.__add__(["fut_"+"table_"+mi.name+"_"+k])
+        comma=""
+        dimCount=0
+        for e in t.dims:
+            if e == "int":
+                ofc.write(comma + "dimSizes_"+mi.name+"_"+k+"["+str(dimCount)+"]")
+            else:
+                ofc.write(comma + str(enums[e].__len__()))
+            comma = ","
+            dimCount+=1
+        ofc.write(");\n")
 
-#declare futhark data arrays
+#read data and create futhark data arrays
+ofc.write("int numPols;\n")
+dataFiles=[]
+for mi in modelInfos.values():
+    if mi.hasData:
+        numDF=0
+        numDFInt=0
+        numDFReal=0
+        for df in mi.dataFieldInfos.values():
+            if df.expression=="":
+                numDF+=1
+                if df.type != "real":
+                    numDFInt+=1
+                else:
+                    numDFReal+=1
+        ofc.write("int intOrReal_"+mi.name+"["+str(numDF)+"]={")
+        comma=""
+        for df in mi.dataFieldInfos.values():
+            if df.expression=="":
+                ofc.write(comma+("1" if df.type=="real" else "0"))
+                comma=","
+        ofc.write("};\n")
+        ofc.write("int arraySize_"+mi.name+"["+str(numDF)+"]={")
+        comma=""
+        for df in mi.dataFieldInfos.values():
+            if df.expression=="":
+                ofc.write(comma+("1" if df.arraySize==0 else str(df.arraySize)))
+                comma=","
+        ofc.write("};\n")
+        ofc.write("err=readData(\""+dataSubDir+"/data_"+mi.name+"\",\"\","+str(numDF)+",intOrReal_"+mi.name+",arraySize_"+mi.name+",&numPols,fileDataInt_"+mi.name+",fileDataReal_"+mi.name+");\n")
+        dataFiles=dataFiles.__add__(["fileDataInt_"+mi.name])
+        dataFiles=dataFiles.__add__(["fileDataReal_"+mi.name])
+        ofc.write("struct futhark_i32_2d *fut_fileDataInt_"+mi.name+"=futhark_new_i32_2d(ctx,fileDataInt_"+mi.name+",numPols,"+str(numDFInt)+");"+nl)
+        ofc.write("struct futhark_f32_2d *fut_fileDataReal_" + mi.name + "=futhark_new_f32_2d(ctx,fileDataReal_" + mi.name + ",numPols," + str(numDFReal) + ");" + nl)
 
 #declare futhark ESG arrays
+#todo
 
-#convert table arrays: c to futhark
+#create the futhark results arrays
+numOutputs=0
+for mi in modelInfos.values():
+    numPeriods=mi.lastProjectionPeriod-mi.firstProjectionPeriod+1
+    for ph in mi.phases.values():
+        for ci in ph.values():
+            if ci.outputMe:
+                numOutputs+=1
+ofc.write("struct futhark_f32_2d *fut_Res;\n")
+ofc.write("float *res=(float*) malloc("+str(numOutputs)+"*"+str(numPeriods)+"*sizeof(float));\n")
 
-#call futhark
+#call futhark (incl.timing)
+ofc.write("struct timespec startTime,endTime;\n")
+ofc.write("clock_gettime(CLOCK_PROCESS_CPUTIME_ID,&startTime);\n")
+
+ofc.write("int futErr=futhark_entry_main(ctx,&fut_Res,"+str(numPeriods)+",")
+for dfl in dataFiles:
+    ofc.write("fut_"+dfl+",")
+comma=""
+for tbl in tables:
+    ofc.write(comma+tbl)
+    comma=","
+ofc.write(");\n")
+
+ofc.write("clock_gettime(CLOCK_PROCESS_CPUTIME_ID,&endTime);\n")
+ofc.write("double diffTime=(endTime.tv_sec-startTime.tv_sec)+(endTime.tv_nsec-startTime.tv_nsec)/1e9;\n")
 
 #get results from futhark
+ofc.write("futhark_values_f32_2d(ctx,fut_Res,res);\n")
 
 #free c table arrays
+for tbl in tables:
+    ofc.write("free ("+tbl[4:]+");"+nl)
 
 #free futhark table arrays
+for mi in modelInfos.values():
+    for (k,t) in mi.tableInfos.items():
+        ofc.write("futhark_free_f32_"+str(1+len(t.dims))+"d(ctx,fut_table_"+mi.name+"_"+k+");\n")
 
 #free c data arrays
+for df in dataFiles:
+    ofc.write("free ("+df+");"+nl)
 
 #free futhark data arrays
+for df in dataFiles:
+    ofc.write("futhark_free_f32_2d(ctx,fut_"+df+ ");\n")
 
 #free c ESG arrays
+#todo
 
 #free futhark ESG arrays
+#todo
 
 #free context
+ofc.write("futhark_context_free(ctx);\n")
+ofc.write("futhark_context_config_free(cfg);\n")
 
 #output results to file
+
+ofc.write("\nreturn 0;\n")
+ofc.write("}"+nl)
+ofc.close()
