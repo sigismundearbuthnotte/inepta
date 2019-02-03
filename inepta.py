@@ -2,15 +2,28 @@ import os
 import sys
 import re
 
+#errors
+def doErr(errStr,infoStr):
+    print(errStr+" "+ infoStr, file=sys.stderr)
+    sys.exit()
+
 #constants
 nl="\n"
-userDefinedFns={"real","exp","sqrt","log","sum","prod","zeros1","zeros2","zeros3","backDisc"}
+userDefinedFns={"real","exp","sqrt","log","sum","prod","zeros1","zeros2","zeros3","backDisc","sumprod","sum1","sum2","cumprod","cumsum"}
 multiBracket={}#lots of []
 br="[]"
 multiBracket[0]=""
 for i in range(1,100):
     multiBracket[i]=br
     br+="[]"
+allowableSections=set(["BASIC","ESG","DATA","DERIVED","PHASE","END","TABLES","COMMON"])
+allowableBasicParams=set(["NAME","ARRAYED","TERM","START","FORCE","FIRSTPROJECTIONPERIOD","LASTPROJECTIONPERIOD"])
+calcSettings={"STORE":True,"TYPE":True,"EXPERIENCE":False,"OUTPUT":False,"REBASE":False,"ARRAYED":True}#dos a value follow the setting?
+allowablecalcSettings=set(calcSettings.keys())
+allowablePhaseSettings=set(["NAME","DIRECTION"])
+allowableDirections=set(["forwards","backwards","static"])
+allowableTableBases=set(["SINGLE","PREFIX","SUFFIX","SUBDIR"])
+allowableTopSections=set(["BASIC","BASES","REBASING","MODELS","END"])
 
 #subdirs
 rootSubDir=sys.argv[1]
@@ -89,6 +102,9 @@ for fl in os.listdir(tempSubDir):
 
 #eliminate white space,capitalise,check if it's a comment and split on multiple delimiters
 def nwscap(l,splits):
+    commPos=l.find("//")
+    if commPos>0:
+        l=l[0:commPos]
     l=l.strip()
     l=l.replace(" ","")
     l=l.replace("\t","")
@@ -117,21 +133,57 @@ numBases=0
 numRebased=0
 off=open(exeSubDir+"/"+"futhark.fut",'w')
 
+
+#read enum info
+ift = open(modelSubDir + "/" + "enums", 'r')
+for l in ift.readlines():
+    (ls,c,lsu)=nwscap(l,"^")#don't split by splitting on something that will not be there
+    if c:
+        if lsu[0]=="[END]":
+            enums[enumName]=en
+            continue
+        if ls[0][0]=='[' and lsu[0]!="[END]":
+            ecount=0
+            enumName=ls[0][1:-1]
+            en={}
+            continue
+        else:
+            en[ls[0]]=ecount
+            ecount+=1
+            continue
+ift.close()
+
 def readBasicModelInfo(mfn):
     mi=modelInfo()
     ift = open(mfn, 'r')
     section=""
     for l in ift.readlines():
-        (ls, c,lsu) = nwscap(l, "=:,")
+        (ls, c,lsu) = nwscap(l, "=:,;")
         if c:
             if ls[0][0] == "[":
+                oldSection=section
                 section = lsu[0][1:len(lsu[0]) - 1]
+                if not section in allowableSections:
+                    doErr("Unknown section ",ls[0])
+                if oldSection!="" and oldSection!="END" and section!="END":
+                    doErr("Unterminated section preceding ", ls[0])
                 continue
+            if l[0:3]=="###":
+                if len(l) >= 5:
+                    if l[3] != ',':
+                        doErr("Have you forgotten the comma after the ###?", l)
             if ls[0]=="###":
                 ci=calcInfoObject()
                 section="CALC"
                 firstLine=True
-                for i in range(0,len(ls)):
+                skipItem=False
+                for i in range(1,len(ls)):
+                    if skipItem:
+                        skipItem=False
+                        continue
+                    if lsu[i] not in allowablecalcSettings:
+                        doErr("Unknown setting for calc: ",l)
+                    skipItem=calcSettings[lsu[i]]
                     if lsu[i]=="OUTPUT":
                         ci.outputMe = True
                     if lsu[i]=="EXPERIENCE":
@@ -139,21 +191,30 @@ def readBasicModelInfo(mfn):
                     if lsu[i]=="STORE":
                         if ls[i+1].isnumeric():
                             ci.stores = int(ls[i + 1])
-                        else:
+                        elif lsu[i+1]=="ALL":
                             ci.stores=-1
+                        else:
+                            doErr("Unknown store setting for calc: ",l)
                     if lsu[i]=="ARRAYED":
                         (ll,_,_)=nwscap(ls[i+1],"[]")
                         ci.isArrayed=True
                         ci.numDims=len(ll)
+                        isOK=all(map((lambda x:x.isnumeric() or x=="numbases"),ll))
+                        if not isOK:
+                            doErr("Unknown array bounds for calc: ",l)
                         ci.dimSizes=[(lambda x: int(x) if x.isnumeric() else (numBases if not ci.usedForRebasing else numRebased))(lll) for lll in ll]
                     if lsu[i]=="TYPE":
                         ci.type=ls[i+1]
+                        if lsu[i+1]!="INT" and lsu[i+1]!="REAL":
+                            doErr("Unknown type for calc: ",l)
                     if  lsu[i]=="REBASE":
                         ci.usedForRebasing=True
                 continue
             if section=="COMMON":
                 mi.commonCode=mi.commonCode.__add__([l])
             if section=="BASIC":
+                if not lsu[0] in allowableBasicParams:
+                    doErr("Unknown basic parameter ",ls[0])
                 if lsu[0]=="NAME":
                     mi.name=ls[1]
                 if lsu[0] == "ARRAYED":
@@ -177,6 +238,25 @@ def readBasicModelInfo(mfn):
                 mi.hasData=True
                 df=dataFieldInfo()
                 df.name=ls[0]
+                typeOK=True
+                if len(ls)==1 or ls[1]=="":
+                    typeOK=False
+                if typeOK:
+                    if not ls[1].__contains__("["):
+                        lTemp=ls[1]
+                    else:
+                        lTemp=ls[1][0:ls[1].find("[")]
+                        if ls[1][-1]!="]" or not ls[1][ls[1].find("[")+1:-1].isnumeric():
+                            typeOK=False
+                    if not enums.__contains__(lTemp):
+                        if len(lTemp)==3 and lTemp!="int":
+                            typeOK=False
+                        if len(lTemp)==4 and lTemp!="real":
+                            typeOK=False
+                        if len(lTemp)!=3 and len(lTemp)!=4:
+                            typeOK=False
+                if not typeOK:
+                    doErr("Unknown type for data field: ",l)
                 if  not ls[1].__contains__("["):#arrayed?
                     df.type=ls[1]
                 else:
@@ -188,13 +268,25 @@ def readBasicModelInfo(mfn):
                 df.expression=l[l.find("=")+1:]
                 mi.hasDerived=True
             if section=="PHASE":
-                if lsu[0]=="NAME":
-                    currPhase={}
-                    mi.phases[ls[1]]=currPhase#disc of calInfoObjects
-                    for ii in range(2,len(ls)):
-                        if lsu[ii]=="DIRECTION":
-                            mi.phaseDirections[ls[1]]=ls[ii+1]
+                skipItem=False
+                for i in range(0,len(ls)):
+                    if skipItem:
+                        skipItem=False
+                        continue
+                    if lsu[i] not in allowablePhaseSettings:
+                        doErr("Unknown phase setting: ",l)
+                    if lsu[i]=="NAME":
+                        currPhase={}
+                        currPhaseName=ls[i+1]
+                        mi.phases[ls[i+1]]=currPhase#disc of calInfoObjects
+                        skipItem=True
+                    if lsu[i]=="DIRECTION":
+                        if ls[i+1] not in allowableDirections:
+                            doErr("Unknown direction for phase: ",l)
+                        mi.phaseDirections[ls[1]]=ls[i+1]
+                        skipItem = True
             if section =="CALC":
+                l=l.strip()
                 if l[0:4]=="call":
                     ci.isCall=True
                     ci.name=l[4:].strip()
@@ -219,12 +311,23 @@ def readBasicModelInfo(mfn):
                             ci.name=l2.replace(",","_")
                         currPhase[ci.name]=ci
                         l=l[l.find("=")+1:]#remove "calc="
+                    if ci.isArrayed and ci.stores == -1:
+                        doErr("Calc cannot be arrayed and store-all: ", ci.name)
+                    if ci.isArrayed and len(ci.fieldsCalcd) > 1:
+                        doErr("Calc cannot be arrayed and return >1 value: ", ci.name)
+                    if ci.stores != 0 and len(ci.fieldsCalcd) > 1:
+                        doErr("Calc cannot return >1 value and store values: ", ci.name)
+                    if mi.phaseDirections[currPhaseName] == "static":
+                        if ci.stores != -1 or ci.isArrayed:
+                            doErr("Calc in static can only be store-all and not arrayed: ",currPhaseName + ":" + ci.name)
                     ci.code.append(l)
             if section == "TABLES":
                 t=tableInfoObject()
                 inDims=False
                 for i in range(0, len(ls)):
                     if lsu[i]=="BASIS":
+                        if lsu[i+1] not in allowableTableBases:
+                            doErr("Unknown table basis: ",l)
                         t.basis=lsu[i+1]
                         inDims=False
                     if inDims:
@@ -233,6 +336,8 @@ def readBasicModelInfo(mfn):
                             dim=dim[1:]
                         if dim[len(dim)-1]==")":
                             dim=dim[0:len(dim)-1]
+                        if dim!="int" and not enums.__contains__(dim):
+                            doErr("Unknown dimension for table: ",l)
                         t.dims.append(dim)
                     if lsu[i]=="NAME":
                         t.name=ls[i+1]
@@ -257,15 +362,26 @@ for l in ift.readlines():
     (ls,c,lsu)=nwscap(l,",=")
     if c:
         if ls[0][0] == "[":
+            oldSection = section
             section = lsu[0][1:len(lsu[0]) - 1]
+            if not section in allowableTopSections:
+                doErr("Unknown section ", ls[0])
+            if oldSection != "" and oldSection != "END" and section != "END":
+                doErr("Unterminated section preceding ", ls[0])
             continue
         if section=="BASIC":
+            if lsu[0] not in set(["MODE"]):
+                doErr("Unknown basic setting for top level model file: ",l)
             if lsu[0]=="MODE":
+                if lsu[1] not in set(["DEPENDENT","INDEPENDENT"]):
+                    doErr("Unknown mode in top level model file: ",l)
                 isDependent=lsu[1]=="DEPENDENT"
         if section=="MODELS":
             modelInfos[ls[0]]=readBasicModelInfo(modelSubDir + "/" + ls[0] + ".model")
         if section=="BASES":
             numBases+=1
+            if numBases==1 and ls[0]!="Experience":
+                doErr("First basis must be Experience: ",l)
             bases[ls[0]]=False
             if len(ls)>2:
                 bases[ls[0]]=(lsu[2]=="TRUE")
@@ -273,6 +389,10 @@ for l in ift.readlines():
                numRebased+=1
         if section=="REBASING":
             rebaseTimes=ls
+            if not l.__contains__(","):
+                print("Warning: No commas in rebase times.  Is this the intention?")
+            if not all(map((lambda x: x.isnumeric()),ls)):
+                doErr("Error in rebase times: ",l)
 
 #enum for bases plus rebase info which may later be read from run parameters instead
 doRebase="["
@@ -284,25 +404,6 @@ for k in bases.keys():
 doRebase+="]"
 off.write("let doRebase="+doRebase+nl)
 off.write("let rebaseTimes:[]i32=["+",".join(rebaseTimes)+"]"+nl)
-
-#read enum info
-ift = open(modelSubDir + "/" + "enums", 'r')
-for l in ift.readlines():
-    (ls,c,lsu)=nwscap(l,"^")#don't split by splitting on something that will not be there
-    if c:
-        if lsu[0]=="[END]":
-            enums[enumName]=en
-            continue
-        if ls[0][0]=='[' and lsu[0]!="[END]":
-            ecount=0
-            enumName=ls[0][1:-1]
-            en={}
-            continue
-        else:
-            en[ls[0]]=ecount
-            ecount+=1
-            continue
-ift.close()
 
 #Process any continuation lines - zap an accumulation line and accumulate until we find a line with a normal ending
 for mi in modelInfos.values():
@@ -648,7 +749,8 @@ for mi in modelInfos.values():
         off.write(l+nl)
 
 #convert scenarios
-off.write("let scens=scensFromArrays scensData"+nl)
+if hasESG:
+    off.write("let scens=scensFromArrays scensData"+nl)
 
 #derived setting functions (inside main because they might use tables)
 for mi in modelInfos.values():
@@ -746,7 +848,7 @@ for mi in modelInfos.values():
             if hasESG:
                 off.write(" (scen:oneScen) ")
             off.write(" (as:state_"+mi.name+"_all ) ="+nl)
-            off.write("\tlet state_bf= init_"+ mi.name + "_" + phName+" d der scen as.state_new\n")
+            off.write("\tlet state_bf= init_"+ mi.name + "_" + phName+" d der"+(" scen " if hasESG else "")+ " as.state_new\n")
             off.write("\tlet as1= as with state_new=state_bf\n")
             off.write("\tin as1 with state__1 = state_bf\n")
 
@@ -1034,9 +1136,9 @@ for mi in modelInfos.values():
     #initial state from either phase0 or phase1 initialisation)
     hasPhase0=mi.phases.keys().__contains__("phase0")
     if hasPhase0:
-        off.write("\tlet init_state = init_"+mi.name+"_phase0 pol der scen\n")
+        off.write("\tlet init_state = init_"+mi.name+"_phase0 pol der"+(" scen " if hasESG else "")+"\n")
     else:
-        off.write("\tlet init_state = init_"+mi.name+"_phase1 pol der scen\n")
+        off.write("\tlet init_state = init_"+mi.name+"_phase1 pol der"+(" scen " if hasESG else "")+"\n")
 
     #initial all-state
     off.write("\tlet init_all_state"+("_prePhase0" if hasPhase0 else "")+":state_"+mi.name+"_all = {"+nl)
@@ -1099,7 +1201,7 @@ for mi in modelInfos.values():
     if hasPhase0:
         off.write("\tlet init_all_state=(init_all_state_prePhase0,[])\n \t|> " + nl)
         off.write("\t(runNPeriods_"+mi.name+"_phase0 (1-firstProjectionPeriod))\n\t|> (.1) |>\n")
-        off.write("\t(init_"+mi.name+"_phase1_all pol der scen"+")"+nl)
+        off.write("\t(init_"+mi.name+"_phase1_all pol der"+(" scen " if hasESG else "")+")"+nl)
 
     #run the non-rebased bases
     off.write("\n\tlet nonRebasedResults1:[][][]f32=map (runOneBasisFromOneTime_"+mi.name+" init_all_state ("+str(mi.firstProjectionPeriod)+") ) (map (1+) (iota (numNonRebased-1)))"+nl)
@@ -1113,7 +1215,7 @@ for mi in modelInfos.values():
             continue
         off.write("\t|>\n")
         if mi.phaseDirections[phName]!="static":
-            off.write("\t(\(x:state_"+mi.name+"_all,y:[][][]f32)->(((init_"+mi.name+"_"+phName+"_all pol der scen ) x),y))\n\t|>\n")#pipe into phase initialisation
+            off.write("\t(\(x:state_"+mi.name+"_all,y:[][][]f32)->(((init_"+mi.name+"_"+phName+"_all pol der"+(" scen " if hasESG else "")+" ) x),y))\n\t|>\n")#pipe into phase initialisation
         if mi.phaseDirections[phName]!="static":
             off.write("\t(runNPeriods_"+mi.name+"_"+phName+" pol."+mi.termField+")"+nl)#pipe into next phase
         else:
@@ -1131,7 +1233,7 @@ for mi in modelInfos.values():
 #closure
 #todo will need a more sophisticated methodology here to avoid memory blowup e.g. extract certain periods
 model=list(modelInfos.keys())[0]#todo temporary
-off.write("let allPols=map2 (runOnePol_"+model+" scens[0]) fileData_"+model+" derived_"+model+nl)
+off.write("let allPols=map2 (runOnePol_"+model+(" scens[0] " if hasESG else "")+") fileData_"+model+" derived_"+model+nl)
 off.write("in reduce (+..+) (zeros2 "+str(numForExperience)+" numPeriods) allPols\n")
 off.close()
 
@@ -1155,7 +1257,7 @@ ofc.write("{"+nl)
 
 #get context and config
 ofc.write(nl)
-ofc.write("struct futhark_context_config * cfg = futhark_context_config_new()"+nl);
+ofc.write("struct futhark_context_config * cfg = futhark_context_config_new();"+nl);
 ofc.write("struct futhark_context * ctx = futhark_context_new(cfg);"+nl)
 
 #declare c table arrays
@@ -1190,7 +1292,7 @@ ofc.write(";" + nl)
 #read tables and get size information, this amalgamates all bases into one big table
 basisToNum={"SINGLE":1,"PREFIX":2,"SUFFIX":3,"SUBDIR":4}
 ofc.write("int err;\n")
-ofc.write("char *basisNames["+str(len(bases))+"]={")
+ofc.write("const char *basisNames["+str(len(bases))+"]={")
 comma=""
 for basis in bases:
     ofc.write(comma+"\""+basis+"\"")
@@ -1255,7 +1357,7 @@ for mi in modelInfos.values():
                 ofc.write(comma+("1" if df.arraySize==0 else str(df.arraySize)))
                 comma=","
         ofc.write("};\n")
-        ofc.write("err=readData(\""+dataSubDir+"/data_"+mi.name+"\",\"\","+str(numDF)+",intOrReal_"+mi.name+",arraySize_"+mi.name+",&numPols,fileDataInt_"+mi.name+",fileDataReal_"+mi.name+");\n")
+        ofc.write("err=readData(\""+dataSubDir+"/data_"+mi.name+"\",\"\","+str(numDF)+",intOrReal_"+mi.name+",arraySize_"+mi.name+",&numPols,&fileDataReal_"+mi.name+",&fileDataInt_"+mi.name+");\n")
         dataFiles=dataFiles.__add__(["fileDataInt_"+mi.name])
         dataFiles=dataFiles.__add__(["fileDataReal_"+mi.name])
         ofc.write("struct futhark_i32_2d *fut_fileDataInt_"+mi.name+"=futhark_new_i32_2d(ctx,fileDataInt_"+mi.name+",numPols,"+str(numDFInt)+");"+nl)
@@ -1308,8 +1410,13 @@ for df in dataFiles:
     ofc.write("free ("+df+");"+nl)
 
 #free futhark data arrays
+intIsh=0
 for df in dataFiles:
-    ofc.write("futhark_free_f32_2d(ctx,fut_"+df+ ");\n")
+    if intIsh==0:
+        ofc.write("futhark_free_i32_2d(ctx,fut_"+df+ ");\n")
+    else:
+        ofc.write("futhark_free_f32_2d(ctx,fut_"+df+ ");\n")
+    intIsh=1-intIsh;
 
 #free c ESG arrays
 #todo
