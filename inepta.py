@@ -24,6 +24,9 @@ allowablePhaseSettings=set(["NAME","DIRECTION","START"])
 allowableDirections=set(["FORWARDS","BACKWARDS","STATIC"])
 allowableTableBases=set(["SINGLE","PREFIX","SUFFIX","SUBDIR"])
 allowableTopSections=set(["BASIC","BASES","SUBBASE","REBASING","MODELS","END"])
+CALCCODE=0
+INITIALISATION=1
+GLOBALFN=2
 
 #subdirs
 rootSubDir=sys.argv[1]
@@ -97,6 +100,7 @@ class calcInfoObject:
         self.isNonRebase=False#Needs a slot per basis because it's either a cflow from NRs or it's calculated by whole array calc from NR cashflows (once for each NR basis)
         self.overwrites=""#if the preceding is true, what calc does it overwrite.  Can only have an __NR overwriting another __NR
         self.isRebase=False#calculated by whole array calc by rebasing (once for each R basis)
+        self.myPhase=None
 
 class basisInfoObject:#might be OTT
     def __init__(self):
@@ -183,6 +187,7 @@ def readBasicModelInfo(mfn):
                         doErr("Have you forgotten the comma after the ###?", l)
             if ls[0]=="###":
                 ci=calcInfoObject()
+                ci.myPhase=currPhaseName
                 section="CALC"
                 firstLine=True
                 skipItem=False
@@ -547,9 +552,195 @@ def convCodeLine(l):
     l=convUserFn(l)#change format of calls to user functions
     return l
 
-#convert line of code - used in both code and initialisation
-def convCode(x,z):#print converted code and return the expression to call to get the value - this could be a function call for an arrayed calc
-    return "googalumba"
+def subStoreAll(mtch,l,ci,mi,isCalcInThisPhase):
+    #cases:
+    # store-all not NR/R: present-this-phase, scalar:present(not this phase i.e. implied t)/past/future, array: time(as scalar) and explicit/implied index
+    # store-all NR/R:  as above, but indexing will depend on basis (possibly implicit)
+    #return (string to insert, first position after match to keep in original string)
+    m=mtch.group()
+    arrExp=" storeAll["#add position in store-all: scalar, array __NR/R
+    arrExp+="i_"+mi.name+"_"+ci.name
+    #find position index if array
+    if not ci.isArrayed and not ci.isNonRebase and not ci.isRebase:
+        if m[-1]=="[":#not arrayed or __NR/R; however, may or may not have a time index
+            bracketCount=1
+            pos=mtch.end()
+            cont=True
+            timeExp=""
+            while cont:#find end of time index and accumulate same
+                if l[pos]=="[":
+                    bracketCount+=1
+                if l[pos]=="]":
+                    bracketCount-=1
+                cont=bracketCount==0
+                if cont:
+                    timeExp+=l[pos]
+                pos+=1
+            arrExp+=","+timeExp+"]"
+            return(arrExp,pos+1)
+        else:
+            if isCalcInThisPhase:
+                return ("",0)#nothing to do case as we can just refer to the calc binding
+            else:
+                arrExp+=",as.t]"
+                return (arrExp,mtch.end())
+    else:
+        #is there a position index present or is it implicit? (we can omit both or position only; if 1 index is present it is time).  For both order is time then position.
+        gotPosIndex=False
+        gotTimeIndex=False
+        if m[-1]=="[":
+            gotTimeIndex=True#must have at least a time index
+            bracketCount=1
+            pos=mtch.end()
+            cont=True
+            timeExp=""
+            while cont:
+                if l[pos]=="[":
+                    bracketCount+=1
+                if l[pos]=="]":
+                    bracketCount-=1
+                cont=bracketCount==0
+                if cont:
+                    timeExp+=l[pos]
+                pos+=1
+            gotPosIndex= l[pos]=="["
+            if gotPosIndex:
+                bracketCount = 1
+                pos +=1
+                cont = True
+                posExp = ""
+                while cont:
+                    if l[pos] == "[":
+                        bracketCount += 1
+                    if l[pos] == "]":
+                        bracketCount -= 1
+                    cont = bracketCount == 0
+                    if cont:
+                        posExp += l[pos]
+                    pos += 1
+    if not gotTimeIndex and not ci.isNonRebase and not ci.isRebase and isCalcInThisPhase:
+        arrExp =ci.name+"[i1]"#current time reference to arrayed.  TODO: this implies can only refer to an arrayed store-all at current time (i.e. before it is stored in the array) using implicit position, not explicit
+        return (arrExp,mtch.end())
+    #no need to convert position into index as we have constants defined in the Futhark
+    if gotPosIndex and gotTimeIndex:
+        arrExp+=posExp+","+timeExp+"]"
+    elif gotPosIndex:
+        arrExp+=posExp+","+"as.t]"
+    elif gotTimeIndex:
+        arrExp+="i1,"+timeExp+"]"
+    else:
+        arrExp+="i1,as.t]"
+    return (arrExp,mtch.end())
+
+#convert line of code - used in both code, initialisation and settting derived, does not apply to NR or R whole-array calcs
+def convCode(mi,ci,codeType):#print converted code and return the expression to call to get the value - this could be a function call for an arrayed calc
+    #get code depending on what we are converting
+    phName=ci.myPhase
+    if codeType==INITIALISATION:
+        pos = ci.initialisation.find("=")
+        code = [ci.initialisation[pos + 1:].copy()]
+    else:
+        code=ci.code.copy()
+    if mi.phaseDirections[phName] == "static" or ci.isNonRebase or ci.isRebase:
+        off.write("let "+ci.name+" (storeAll:*[][]f32):*[][]f32=\n")#w/a case
+    else:
+        off.write("\tlet " + ci.lhs + "=" + nl)  # start of assigment for ordinary case
+    if ci.isArrayed:
+        # the calc now becomes the inner-most internal function to be called by partial application
+        off.write("\tlet " + ci.name + "_arr" + str(ci.numDims))
+        for ind in range(1, ci.numDims + 1):  # array index parameters
+            off.write(" (i" + str(ind) + ":i32) ")
+        off.write(":f32=\n")
+    for l in code:  # loop through lines
+        l = " " + l + " "#a frequent patern is alphanum_ terminated with !alphanum_.  This is to ensure that'll work at the start and end of the line
+        l = re.sub("[a-zA-Z]\w*\s*=[^=]", lambda x: "let " + x.group(), l)  # let in front of binding
+        l = convUserFn(l)  # format of calls to user-defined functions
+        if len(ci.code) > 1:#return of calc value
+            l = l.replace("return ", "\tin ")
+        else:
+            l = l.replace("return ", "")
+        for kt in mi.tableInfos.keys():  # convert table name to name of parameter of main
+            l = re.sub("[\W]" + kt + "[\W]",lambda x: x.group()[0] + "table_" + kt + "_" + mi.name + x.group()[len(kt) + 1:], l)
+        for df in mi.dataFieldInfos.values():  # add as.p. in front of data/derived fields
+            if df.expression == "":
+                l = re.sub("[\W]" + df.name + "[\W]",lambda x: x.group()[0] + "as.p." + df.name + x.group()[len(df.name) + 1:], l)
+            else:
+                l = re.sub("[\W]" + df.name + "[\W]",lambda x: x.group()[0] + "as.der." + df.name + x.group()[len(df.name) + 1:], l)
+        l = re.sub("[\W]" + "t" + "[\W]", lambda x: x.group()[0] + "as.t" + x.group()[2:], l)  # "t"
+        l = re.sub("[\W]" + "basisNum" + "[\W]", lambda x: x.group()[0] + "as.basisNum" + x.group()[9:], l)  # basis
+        if mi.phaseDirections[phName] == "static" or ci.isNonRebase or ci.isRebase:
+            # static phase or __NR/R - need whole arrays.  See below for more explanation
+            for udf in userDefinedFns:  # find (the only) user defined function and insert storeAll after it.
+                if l.find(udf) > 0:
+                    fpos = l.find(udf) + len(udf)
+                    break
+            l = l[:fpos] + " storeAll " + l[fpos:]
+        # references to other calcs
+        for (phName2, ph2) in mi.phases.items():
+            for ci2 in ph2.values():
+                if mi.phaseDirections[phName] != "static" and not ci.isNonRebase and not ci.isRebase:
+                    if not ci2.isArrayed and ci2.stores!=-1:
+                        #scalar (not s/a): only need to check for past values, could be a tuple
+                        for past in range(1, ci2.stores + 1):
+                            for fld in ci.fieldsCalcd:
+                                l = re.sub("[\W]" + fld + "__" + str(past) + "[\W]",lambda x: x.group()[0] + "as.state__" + str(past) + "." + fld + x.group()[len(fld + "__" + str(past)) + 1:],l)
+                    if ci2.isArrayed and ci2.stores != -1:
+                        #array (not s/a): check for past values and for implied array indices (1d only)
+                        for past in range(1, ci2.stores + 1):
+                            l = re.sub("[\W]" + ci2.name + "__" + str(past) + "[\W]",lambda x: x.group()[0] + "as.state__" + str(past) + "." + ci2.name + x.group()[len(ci2.name + "__" + str(past)) + 1:],l)
+                        l = re.sub("[\W]" + ci2.name + "[\W]",lambda x: (x.group() if (x.end()!=len(l)-1 and x.group()[-1]=="[")  else (x.group()[:-1]+"[i1]"+x.group()[-1])),l)
+                    if ci2.stores==-1:
+                        empty=False
+                        while not empty:#use finditer to get an occurence of the pattern but abandon the loop after processing it as the string will have changed
+                            empty=True
+                            itern = re.finditer("[\W]" + ci2.name + "[\W]", l)
+                            for x in itern:
+                                empty=False
+                                (str,ep)=subStoreAll(x,l,ci2,mi,phName2==ci.myPhase)#new string to insert plus posn of remainder of line
+                                l=l[:x.start()]+str+l[ep:]
+                                break#only do on iter as l has changed
+                else:
+                    #w/a calcs - we already added storeAll above
+                    #pattern=fn <arrays> <tables>: add in "storeAll", sa->sa indices (if arrayed), sa[i]-> 1 index (for arrayed).  The remaining params should be tables only and are assumed to "match up" FTB.
+                    #NB: when converting the surrouding calc, will need to wrap in a fn taking and returning storeAll
+                    if ci2.stores==-1:
+                        empty=False
+                        while not empty:#same logic as above iro finditer
+                            empty=True
+                            itern = re.finditer("[\W]" + ci2.name + "[\W]", l)
+                            for x in itern:
+                                #2 array cases: has index: translate it, no index: supply all
+                                if not ci2.isArrayed and not ci2.isNonRebase and not ci2.isRebase:
+                                    str="[i_"+mi.name+"_"+ci2.name+"]"#scalar
+                                    ep=x.end()
+                                elif x.group()[-1]!="[":
+                                    ind="i_"+mi.name+"_"+ci2.name
+                                    str="(steps "+ind+" ("+ind+"_end-"+ind+"+1) 1)"#all array
+                                    ep=x.end()
+                                else:
+                                    #one particular element.  TODO: a range
+                                    elt=""
+                                    for i in range(x.end(),999999):
+                                        if l[i]!="]":
+                                            elt+=l[i]
+                                        else:
+                                            break
+                                    str="(i_"+mi.name+"_"+ci2.name+"+"+str(ind)+")"#can use a number,an enum or a basis name (which have already been assigned constants)
+                                l = l[:x.start()] + str + l[ep:]
+                                empty=False
+                                break
+    if ci.isArrayed and mi.phaseDirections[phName] != "static":#multi-level mappings for arrayed
+        for ind in range(1, ci.numDims):  # loop over map functions
+            off.write("let " + ci.name + "_arr" + str(ci.numDims - ind))
+            for ind2 in range(1, ci.numDims - ind + 1):  # loop over parameters of a map function
+                off.write(" (i" + str(ind2) + ":i32) ")
+            off.write(":" + multiBracket[ind] + "f32=map (" + ci.name + "_arr" + str(
+                ci.numDims - ind + 1) + " ")  # partial application of previous mapping function
+            for ind2 in range(1, ci.numDims - ind + 1):  # partial application (2)
+                off.write(" i" + str(ind2) + " ")
+            off.write(") (iota " + str(
+                ci.dimSizes[ci.numDims - ind]) + ") \n")  # the iota to which we apply the partial application
+        off.write("in map " + ci.name + "_arr1 (iota " + str(ci.dimSizes[0]) + ")\n")
 
 #Global function code (this is user defined, so not read verbatim)
 ift=open(modelSubDir+"/"+"functions",'r')
@@ -737,14 +928,14 @@ for mi in modelInfos.values():
         for ph in mi.phases.values():
             for ci in ph.values():
                 if ci.stores==-1:
-                    isPresent=False
+                    isPresent=False#done already?
                     for fld in ci.fieldsCalcd:
                         if inds_added.keys().__contains__(fld):
                             isPresent=True
                             break
                     if isPresent:
                         continue
-                    if ci.overwrites=="":
+                    if ci.overwrites=="":#not an overwriter
                         i_added=True
                         for fld in ci.fieldsCalcd:
                             inds_added[fld]=i_count
@@ -755,9 +946,11 @@ for mi in modelInfos.values():
                             i_count+=numNonRebased
                         else:
                             i_count+=(ci.dimSizes[0] if ci.isArrayed else 1)
+                        off.write("let i_"+mName+"_"+fld+"_end="+str(i_count-1)+nl)
                     elif inds_added.__contains__(ci.overwrites):
                         i_added=True
                         off.write("let i_" + mName + "_" + ci.name + "=" + str(inds_added[ci.overwrites]) + nl)
+                        off.write("let i_" + mName + "_" + ci.name + "_end=i_" + mName +"_"+ci.overwrites+"_end" + nl)
                         inds_added[ci.name]=inds_added[ci.overwrites]
     off.write("let numSAs="+str(i_count)+nl)
 
@@ -846,9 +1039,7 @@ for initMode in range(0,2):#ordinary, store-all
                     initCode=""
                     if ci.stores>0 or ci.stores==-1:#only those in state. Create binding to local value then that will be placed either in state or in store-all
                         if ci.initialisation!="" and ph2 is ph:#only use initialisation on the calc's own phase
-                            pos=ci.initialisation.find("=")
-                            expr=ci.initialisation[pos+1:]
-                            initCode=convCode(expr,1)
+                            initCode=convCode(mi,ci,INITIALISATION)
                         elif (count == 1 or mi.phaseStart[phName]!="previousTime") and initMode==0:  # zeroise on first phase only
                             if ci.numDims == 0:
                                 initCode = "("+"".join([ "0," for fld in ci.fieldsCalcd])

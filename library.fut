@@ -66,16 +66,18 @@ let backDisc1 (v:[]f32) (PVs:*[]f32) (cflow:[]f32):*[]f32= -- deprecated, does o
     let (discd,t)= loop (discd':*[]f32,t':i32) = (PVs',(n-1)) while t'>=1i32 do (discd' with [t'-1] = discd'[t']*v[t']+cflow[t'-1],(t'-1))
     in discd
 
---2 arrays; pass slices of store-all in
-let backDisc2 [n] (cflow:*[][n]f32) (v:[][]f32):*[][n]f32=
+--2 arrays; pass store-all in plus rows thereof to alter
+let backDisc2 [n] (cflow:*[][n]f32) (v:[][]f32) (inds:[]i32) :*[][n]f32=
+    let i1=inds[0]
+    let i2=inds[1]
     let discd=
     if n==0 then 
         [] 
     else
         let (d,_)=
         loop (discd':*[][]f32,t':i32) = (cflow,(n-1)) while t'>=1i32 do 
-            let disc2=discd' with [0,t'-1] = discd'[0,t'-1]+discd'[0,t']*v[0,t']
-            let disc3=disc2 with [1,t'-1] = disc2[1,t'-1]+disc2[1,t']*v[1,t']
+            let disc2=discd' with [i1,t'-1] = discd'[i1,t'-1]+discd'[i1,t']*v[i1,t']
+            let disc3=disc2 with [i2,t'-1] = disc2[i2,t'-1]+disc2[i2,t']*v[i2,t']
             in (disc3,(t'-1))
         in d
     in discd
