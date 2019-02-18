@@ -1,0 +1,24 @@
+[basic]
+mode=independent
+stochastic=false//if true, need an ESG
+numScenarios=0
+[end]
+[subbase]
+name=disc
+disc1
+disc2
+disc3
+[end]
+[bases]//an enum for these is automatically created
+Experience
+RsvUK,rebased=false,sub=disc//subbases use the same calculations but might use different s/a's or the same s/a's with e.g different discounting.  For simplicity, in all cases, ALL the s/a's will be replicated.  Thus we will save time but not space.
+RsvS2,rebased=false
+RsvIFRS,rebased=true
+[end]
+[rebasing]
+//++ at end provides increments thereafter
+1,13,++12
+[end]
+[models]
+ia1
+[end]
