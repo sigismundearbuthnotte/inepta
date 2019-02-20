@@ -18,7 +18,7 @@ for i in range(1,100):
     br+="[]"
 allowableSections=set(["BASIC","ESG","DATA","DERIVED","PHASE","END","TABLES","COMMON"])
 allowableBasicParams=set(["NAME","ARRAYED","TERM","START","FORCE","FIRSTPROJECTIONPERIOD","LASTPROJECTIONPERIOD","BATCHSIZEEXTERNAL","BATCHSIZEINTERNAL"])
-calcSettings={"STORE":True,"TYPE":True,"__NR1":False,"__NR2":False,"__R":False,"OUTPUT":False,"OVERWRITES":True}#does a further value follow the setting name?
+calcSettings={"STORE":True,"TYPE":True,"__NR1":False,"__NR2":False,"__R1":False,"__R2":False,"OUTPUT":False,"OVERWRITES":True}#does a further value follow the setting name?
 allowablecalcSettings=set(calcSettings.keys())
 allowablePhaseSettings=set(["NAME","DIRECTION","START"])
 allowableDirections=set(["FORWARDS","BACKWARDS","STATIC"])
@@ -27,6 +27,8 @@ allowableTopSections=set(["BASIC","BASES","SUBBASE","REBASING","MODELS","END"])
 CALCCODE=0
 INITIALISATION=1
 GLOBALFN=2
+DERIVED=3
+COMMON=4
 
 #subdirs
 rootSubDir=sys.argv[1]
@@ -75,7 +77,6 @@ class dataFieldInfo(object):#covers derived fields as well
         self.type=""
         self.arraySize=0
         self.expression=""#raw expression for derived
-
 
 class tableInfoObject:
     def __init__(self):
@@ -186,8 +187,8 @@ def readBasicModelInfo(mfn):
                 continue
             if l[0:3]=="###":
                 if len(ls[0]) >= 4:
-                    if l[3] != ',':
-                        doErr("Have you forgotten the comma after the ###?", l)
+                    l="###,"+l[3:]
+                    (ls, c, lsu) = nwscap(l, "=:,;")
             if ls[0]=="###":
                 ci=calcInfoObject()
                 ci.myPhase=currPhaseName
@@ -236,9 +237,14 @@ def readBasicModelInfo(mfn):
                         ci.stores=-1
                         ci.isNonRebase=True
                         ci.isWholeArray=True
-                    if lsu[i] == "__R":
+                    if lsu[i] == "__R1":
                         ci.stores = -1
                         ci.isRebase = True
+                        ci.isWholeArray = False
+                    if lsu[i] == "__R2":
+                        ci.stores = -1
+                        ci.isRebase = True
+                        ci.isWholeArray = True
                     if lsu[i]=="OVERWRITES":
                         ci.overwrites=ls[i+1]
                 continue
@@ -405,6 +411,8 @@ ift = open(modelSubDir + "/" + modelInfoFile+".model", 'r')
 section=""
 sbVals={}#subbasis name->list of enum values
 inSubBase=False
+numScens=0
+numInnerScens=0
 for l in ift.readlines():
     (ls,c,lsu)=nwscap(l,",=")
     if c:
@@ -417,7 +425,7 @@ for l in ift.readlines():
                 doErr("Unterminated section preceding ", ls[0])
             continue
         if section=="BASIC":
-            if lsu[0] not in set(["MODE","STOCHASTIC","NUMSCENARIOS"]):
+            if lsu[0] not in set(["MODE","STOCHASTIC","NUMSCENARIOS","NUMINNERSCENARIOS"]):
                 doErr("Unknown basic setting for top level model file: ",l)
             if lsu[0]=="MODE":
                 if lsu[1] not in set(["DEPENDENT","INDEPENDENT"]):
@@ -427,6 +435,8 @@ for l in ift.readlines():
                 isStochastic=lsu[1]=="TRUE"
             if lsu[0] == "NUMSCENARIOS":
                 numScens=int(lsu[1])
+            if lsu[0] == "NUMINNERSCENARIOS":
+                numInnerScens = int(lsu[1])
         if section=="SUBBASE":
             if lsu[0]=="NAME":
                 sbVals[ls[1]]=[]
@@ -451,7 +461,7 @@ for l in ift.readlines():
                 for i in range(1,len(ls)):
                     if lsu[i]=="REBASED":
                         bi.isRebase=lsu[i+1]=="TRUE"
-                    if lsu[i] == "SUB":
+                    if lsu[i] == "SUBBASE":
                         bi.subBases = sbVals[ls[i+1]]
                         numSBs=bi.subBases.__len__()
                 numBases+=1
@@ -568,7 +578,7 @@ def convCodeLine(l):
     l=convUserFn(l)#change format of calls to user functions
     return l
 
-def subStoreAll(mtch,l,ci,mi,isCalcInThisPhase):
+def subStoreAll(mtch,l,ci,mi,isCalcInThisPhase):#return substituted code for a reference to a s/a
     #cases:
     # store-all not NR/R: present-this-phase, scalar:present(not this phase i.e. implied t)/past/future, array: time(as scalar) and explicit/implied index
     # store-all NR/R:  as above, but indexing will depend on basis (possibly implicit)
@@ -652,14 +662,14 @@ def subStoreAll(mtch,l,ci,mi,isCalcInThisPhase):
 def convCode(mi,ci,codeType):#print converted code and return the expression to call to get the value - this could be a function call for an arrayed calc
     #get code depending on what we are converting
     phName=ci.myPhase
-    if codeType==INITIALISATION:
+    if codeType==INITIALISATION or codeType==DERIVED:
         pos = ci.initialisation.find("=")
-        code = [ci.initialisation[pos + 1:].copy()]
+        code = [ci.initialisation[pos + 1:]]
     else:
         code=ci.code.copy()
     if mi.phaseDirections[phName] == "static" or ci.isNonRebase or ci.isRebase:
         off.write("let "+ci.name+" (storeAll:*[][]f32):*[][]f32=\n")#w/a case
-    else:
+    elif ci.lhs!="":
         off.write("\tlet " + ci.lhs + nl)  # start of assigment for ordinary case
     if ci.isArrayed:
         # the calc now becomes the inner-most internal function to be called by partial application
@@ -668,6 +678,9 @@ def convCode(mi,ci,codeType):#print converted code and return the expression to 
             off.write(" (i" + str(ind) + ":i32) ")
         off.write(":f32=\n")
     for l in code:  # loop through lines
+        commPos = l.find("//")  # find and eliminate comments
+        if commPos > 0:
+            l = l[0:commPos]
         l = " " + l + " "#a frequent patern is alphanum_ terminated with !alphanum_.  This is to ensure that'll work at the start and end of the line
         l = re.sub("[a-zA-Z]\w*\s*=[^=]", lambda x: "let " + x.group(), l)  # let in front of binding
         l = convUserFn(l)  # format of calls to user-defined functions
@@ -718,15 +731,19 @@ def convCode(mi,ci,codeType):#print converted code and return the expression to 
                             break
                     if vt.dim2HasLB:
                         l=l[:pos]+"(-lb_"+kt+"_"+mi.name+"_2)+"+l[pos:]
-        for df in mi.dataFieldInfos.values():  # add as.p. in front of data/derived fields
+        for df in mi.dataFieldInfos.values():  # add as.p. in front of data/derived fields TODO implicit index for arrayed data fields
+            dfPrefix="as.p."
+            if codeType==DERIVED:
+                dfPrefix="d."
             if df.expression == "":
-                l = re.sub("[\W]" + df.name + "[\W]",lambda x: x.group()[0] + "as.p." + df.name + x.group()[len(df.name) + 1:], l)
+                l = re.sub("[\W]" + df.name + "[\W]",lambda x: x.group()[0] + dfPrefix + df.name + x.group()[len(df.name) + 1:], l)
             else:
                 l = re.sub("[\W]" + df.name + "[\W]",lambda x: x.group()[0] + "as.der." + df.name + x.group()[len(df.name) + 1:], l)
         l = re.sub("[\W]" + "t" + "[\W]", lambda x: x.group()[0] + "as.t" + x.group()[2:], l)  # "t"
         l = re.sub("[\W]" + "basisNum" + "[\W]", lambda x: x.group()[0] + "as.basisNum" + x.group()[9:], l)  # basis
         if mi.phaseDirections[phName] == "static" or ci.isNonRebase or ci.isRebase:
             # static phase or __NR/R - need whole arrays.  See below for more explanation
+            fpos=0
             for udf in userDefinedFns:  # find (the only) user defined function and insert storeAll after it.
                 if l.find(udf) > 0:
                     fpos = l.find(udf) + len(udf)
@@ -744,7 +761,8 @@ def convCode(mi,ci,codeType):#print converted code and return the expression to 
                     if ci2.isArrayed and ci2.stores != -1:
                         #array (not s/a): check for past values and for implied array indices (1d only)
                         for past in range(1, ci2.stores + 1):
-                            l = re.sub("[\W]" + ci2.name + "__" + str(past) + "[\W]",lambda x: x.group()[0] + "as.state__" + str(past) + "." + ci2.name + x.group()[len(ci2.name + "__" + str(past)) + 1:],l)
+                            sp=str(past)
+                            l = re.sub("[\W]" + ci2.name + "__" + sp + "[\W]",lambda x: x.group()[0] + "as.state__" + sp + "." + ci2.name + x.group()[len(ci2.name + "__" + sp) + 1:],l)
                         l = re.sub("[\W]" + ci2.name + "[\W]",lambda x: (x.group() if (x.end()!=len(l)-1 and x.group()[-1]=="[")  else (x.group()[:-1]+"[i1]"+x.group()[-1])),l)
                     if ci2.stores==-1:
                         empty=False
@@ -753,8 +771,8 @@ def convCode(mi,ci,codeType):#print converted code and return the expression to 
                             itern = re.finditer("[\W]" + ci2.name + "[\W]", l)
                             for x in itern:
                                 empty=False
-                                (str,ep)=subStoreAll(x,l,ci2,mi,phName2==ci.myPhase)#new string to insert plus posn of remainder of line
-                                l=l[:x.start()]+str+l[ep:]
+                                (stri,ep)=subStoreAll(x,l,ci2,mi,phName2==ci.myPhase)#new string to insert plus posn of remainder of line
+                                l=l[:x.start()]+stri+l[ep:]
                                 break#only do on iter as l has changed
                 else:
                     #w/a calcs - we already added storeAll above
@@ -768,11 +786,11 @@ def convCode(mi,ci,codeType):#print converted code and return the expression to 
                             for x in itern:
                                 #4 cases: scalar + 3 array cases: has index: translate it (could be a range, i.e. has a colon), no index: supply all
                                 if not ci2.isArrayed and not ci2.isNonRebase and not ci2.isRebase:
-                                    str="[i_"+mi.name+"_"+ci2.name+"]"#scalar
+                                    stri="[i_"+mi.name+"_"+ci2.name+"]"#scalar
                                     ep=x.end()
                                 elif x.group()[-1]!="[":
                                     ind="i_"+mi.name+"_"+ci2.name
-                                    str="(steps "+ind+" ("+ind+"_end-"+ind+"+1) 1)"#all array
+                                    stri="(steps "+ind+" ("+ind+"_end-"+ind+"+1) 1)"#all array
                                     ep=x.end()
                                 else:
                                     #one particular element, or range
@@ -783,17 +801,18 @@ def convCode(mi,ci,codeType):#print converted code and return the expression to 
                                         else:
                                             break
                                     if not elt.__contains__(":"):
-                                        str="(i_"+mi.name+"_"+ci2.name+"+"+elt+")"#can use a number,an enum or a basis name (which have already been assigned constants, so no need for any conversion)
+                                        stri="(i_"+mi.name+"_"+ci2.name+"+"+elt+")"#can use a number,an enum or a basis name (which have already been assigned constants, so no need for any conversion)
                                     else:
                                         elts=str.split(":")
                                         ind1 = " (i_" + mi.name + "_" + ci2.name+"+"+elts[0]+") "
                                         ind2 = " (i_" + mi.name + "_" + ci2.name+"+"+elts[1]+") "
-                                        str="(steps "+ind1+" ("+ind2+"-"+ind1+")"+ " 1)"#range
+                                        stri="(steps "+ind1+" ("+ind2+"-"+ind1+")"+ " 1)"#range
                                     ep=pos+1
-                                l = l[:x.start()] + str + l[ep:]
+                                l = l[:x.start()] + stri + l[ep:]
                                 empty=False
                                 break#next iter as string changed
         l.replace("][",",")#any left over ][ from multi-d arrays (but not tables).  Come to think of it, does it make any difference in Futhark?  It does as you need e.g. (x[0])[1]
+        off.write(l+nl)
     if ci.isArrayed and mi.phaseDirections[phName] != "static":#multi-level mappings for arrayed
         for ind in range(1, ci.numDims):  # loop over map functions
             off.write("let " + ci.name + "_arr" + str(ci.numDims - ind))
@@ -847,6 +866,11 @@ for mi in modelInfos.values():
     off.write("let numScens="+str(numScens)+nl)
     numPeriods=mi.lastProjectionPeriod-mi.firstProjectionPeriod+1
     break
+
+#rebase times
+off.write("\nlet rbtrue=replicate (length rebaseTimes) true" + nl)
+off.write("let rbts:*[]bool = replicate numPeriods" + " false " + nl)
+off.write("let isRebaseTime:*[]bool=scatter rbts rebaseTimes rbtrue\n")
 
 #data-record types
 off.write(nl)
@@ -1038,13 +1062,13 @@ for mi in modelInfos.values():
         colCount=0
         for (k,v) in mi.esg.items():#get arrays
             if v==[1]:#scalar
-                off.write("\tlet "+k+"=flatten scen[:,"+str(colCount)+":"+str(colCount+1)+"]"+nl)
+                off.write("\tlet "+k+"=scen[:,"+str(colCount)+"]"+nl)
                 colCount+=1
             elif len(v)==1: #vector
                 off.write("\tlet "+k+"=scen[:,"+str(colCount)+":"+str(colCount+v[0])+"]"+nl)
                 colCount+=v[0]
             else: #matrix (grid)
-                off.write("\tlet "+k+"=unflatten "+str(v[0])+" "+str(v[1])+" scen[:,"+str(colCount)+":"+str(colCount+v[0]*v[1])+"]"+nl)
+                off.write("\tlet "+k+"=map (unflatten "+str(v[0])+" "+str(v[1])+") scen[:,"+str(colCount)+":"+str(colCount+v[0]*v[1])+"]"+nl)
                 colCount+=v[0]*v[1]
         off.write("\n\tin\n\t{")
         comma=""
@@ -1059,6 +1083,11 @@ for mi in modelInfos.values():
 #main function
 off.write(nl)
 off.write("let main ")
+off.write(" [numBases] ")
+for mi in modelInfos.values():#data files
+    if mi.hasData:
+        off.write(" [numPols] ")
+        break
 if hasESG:
     off.write(" (scensData:[][][]f32) ")
 for mi in modelInfos.values():#data files
@@ -1066,8 +1095,45 @@ for mi in modelInfos.values():#data files
         off.write("(fileDataInt_"+mi.name+":[numPols][]i32) (fileDataReal_"+mi.name+":[numPols][]f32)")
 for mi in modelInfos.values():#tables and their lower bounds (for (possibly) inner 2 dimensions)
     for t in mi.tableInfos.values():
-        off.write(" (table_"+t.name+"_"+mi.name+":[numBases]"+multiBracket[len(t.dims)]+"f32) (lb_"+t.name+"_"+mi.name+":[]i32) ")
+        off.write(" (table_"+t.name+"_"+mi.name+":"+("[numBases]" if t.basis!="SINGLE" else "")+multiBracket[len(t.dims)]+"f32) (lb_"+t.name+"_"+mi.name+":[]i32) ")
 off.write(":[][]f32="+nl)
+
+# create dummy calcInfo for use in common code and setDerived, no need to set fields (defaults are fine) except code and that is set at the point of use
+dummyCi=calcInfoObject()
+dummyCi.myPhase="phase0"
+
+#convert scenarios
+if hasESG:
+    off.write("let scens=scensFromArrays scensData"+nl)
+
+#common code - i.e outside calcs - can really access only tables or call user-defined functions
+for mi in modelInfos.values():
+    dummyCi.code=mi.commonCode
+    dummyCi.lhs=""
+    convCode(mi, dummyCi, CALCCODE)
+    off.write(nl)
+
+#derived setting functions (inside main because they might use tables or scenarios)
+for mi in modelInfos.values():
+    if mi.hasDerived:
+        off.write("\nlet setDerived_"+mi.name+"(d:data_"+mi.name+"):derived_"+mi.name+"="+nl)
+        for df in mi.dataFieldInfos.values():  # set temporary variables to derived expressions
+            if df.expression != "":
+                dummyCi.name=df.name
+                dummyCi.lhs=df.name+"="
+                dummyCi.initialisation=df.expression
+                if df.arraySize>0:
+                    dummyCi.isArrayed=True
+                    dummyCi.numDims=1
+                    dummyCi.dimSizes=[df.arraySize]
+                convCode(mi, dummyCi, DERIVED)
+        comma=""
+        off.write("in {"+nl)#now create record
+        for df in mi.dataFieldInfos.values():
+            if df.expression!="":
+                off.write(comma+df.name+"="+df.name+nl)
+                comma=","
+        off.write("}" + nl)  # now create record
 
 #bind constants to array LBs to avoid excess indexing
 off.write(nl)
@@ -1078,6 +1144,17 @@ for mi in modelInfos.values():
 off.write(nl)
 
 off.write("\nunsafe\n\n")
+
+#get data
+off.write(nl)
+for mi in modelInfos.values():
+    if mi.hasData:
+        off.write("let fileData_"+mi.name+"=dataFromArrays_"+mi.name+" fileDataInt_"+mi.name+" fileDataReal_"+mi.name+nl)
+
+#get derived
+for mi in modelInfos.values():
+    if mi.hasDerived:
+        off.write("let derived_"+mi.name+"=map setDerived_"+mi.name+" fileData_"+mi.name+nl)
 
 #initialisation functions for setting initial state based on whether we want resume from where we left off in the (non-static) previous phase, or not.
 #two functions actually, for state and for store-alls
@@ -1112,38 +1189,19 @@ for initMode in range(0,2):#ordinary, store-all
                 for ci in ph2.values():
                     initCode=""
                     if ci.stores>0 or ci.stores==-1:#only those in state. Create binding to local value then that will be placed either in state or in store-all
-                        if ci.initialisation!="" and ph2 is ph:#only use initialisation on the calc's own phase
-                            initCode=convCode(mi,ci,INITIALISATION)
-                        elif (count == 1 or mi.phaseStart[phName]!="previousTime") and initMode==0:  # zeroise on first phase only
-                            if ci.numDims == 0:
-                                initCode = "("+"".join([ "0," for fld in ci.fieldsCalcd])
-                                initCode=ci.lhs + initCode[:-1] + ")"
-                            else:
-                                initCode=ci.lhs +"zeros" + str(ci.numDims) + " " + " ".join(map(str, ci.dimSizes))
+                        if ci.initialisation!="" and ph2 is ph:#only use initialisation on the calc's own phase, no need for zeroisation, that was done when the state was created
+                            convCode(mi,ci,INITIALISATION)
                         if (initMode==0 and ci.stores>0 or initMode==1 and ci.stores==-1) and initCode!="":
-                            off.write(initCode + nl)  # the local binding
                             for fld in ci.fieldsCalcd:#record which calcs were initialised (used with "with" in state creation)
                                 inited.add(fld)
-            if initMode==0:
-                #creating state
-                if count==1 or mi.phaseStart[phName]!="previousTime":#compose the record, if no state b/f
-                    off.write("\nin {")
-                    comma=""
-                    for ph2 in mi.phases.values():
-                        for ci in ph2.values():
-                            if ci.stores > 0:
-                                for fld in ci.fieldsCalcd:
-                                    off.write(comma+fld+"="+fld)
-                                    comma=","
-                    off.write("}\n\n")
-                else: #we have state b/f so can use "with"
-                    if len(inited)!=0:
-                        off.write("\nin stateFromLastPhase ")
-                        for ci in inited:
-                            off.write(" with "+ci+"="+ci)
-                        off.write(nl)
-                    else:
-                        off.write("\n= stateFromLastPhase "+nl)
+            if initMode==0:#can always use "with" as we always create a zeroised state before any initialisations
+                if len(inited)!=0:
+                    off.write("\nin stateFromLastPhase ")
+                    for ci in inited:
+                        off.write(" with "+ci+"="+ci)
+                    off.write(nl)
+                else:
+                    off.write("\n= stateFromLastPhase "+nl)
             else:
                 #storing in store-all; 3 cases: scalar (and that includes __NR, in this case), genuine array
                 off.write("let sa=storeAllFromLastPhase\n")
@@ -1159,7 +1217,7 @@ for initMode in range(0,2):#ordinary, store-all
                                 off.write(" with [i_"+mi.name+"_"+ci.name+"+nrBasisNum,"+mi.phaseStart[phName]+"-firstProjectionPeriod]="+ci.name+nl)
                 off.write("in sa\n")
 
-#function to initialise the all-state on latter phases
+#function to initialise the all-state on latter phases.  Sets state and start time.
 off.write(nl)
 for mi in modelInfos.values():
     count = 0
@@ -1167,20 +1225,19 @@ for mi in modelInfos.values():
         count+=1
         if mi.phaseDirections[phName] == "static":
             continue  # no initialisation for static, as it's not a run through time
-        if count>1:
-            off.write("\nlet init_" + mi.name + "_" + phName+"_all")
-            if mi.hasData:
-                off.write(" (d:data_" + mi.name + ") ")
-            if mi.hasDerived:
-                off.write(" (der:derived_" + mi.name + ") ")
-            if hasESG:
-                off.write(" (scen:oneScen) ")
-            off.write("( nrBasisNum:i32 )")
-            off.write(" (storeAllFromLastPhase:[][]f32) ")
-            off.write(" (as:state_"+mi.name+"_all )")
-            off.write(" :state_"+mi.name+"_all  ="+nl)
-            off.write("\tlet state_bf= init_"+ mi.name + "_" + phName+" nrBasisNum as.t"+(" d " if mi.hasData else "")+(" der " if mi.hasDerived else "")+(" scen " if hasESG else "")+(" as.state__1" if mi.phaseStart[phName]=="previousTime"  else "")+ (" storeAllFromLastPhase " if mi.phaseStart[phName]=="previousTime"  else "")+"\n")
-            off.write("\tin as with state__1=state_bf"+ ("" if mi.phaseStart[phName]=="previousTime" else " with t="+mi.phaseStart[phName])+nl)
+        off.write("\nlet init_" + mi.name + "_" + phName+"_all")
+        if mi.hasData:
+            off.write(" (d:data_" + mi.name + ") ")
+        if mi.hasDerived:
+            off.write(" (der:derived_" + mi.name + ") ")
+        if hasESG:
+            off.write(" (scen:oneScen) ")
+        off.write("( nrBasisNum:i32 )")
+        off.write(" (storeAllFromLastPhase:[][]f32) ")
+        off.write(" (as:state_"+mi.name+"_all )")
+        off.write(" :state_"+mi.name+"_all  ="+nl)
+        off.write("\tlet state_bf= init_"+ mi.name + "_" + phName+" nrBasisNum as.t"+(" d " if mi.hasData else "")+(" der " if mi.hasDerived else "")+(" scen " if hasESG else "")+(" as.state__1" if mi.phaseStart[phName]=="previousTime"  else "")+ (" storeAllFromLastPhase " if mi.phaseStart[phName]=="previousTime"  else "")+"\n")
+        off.write("\tin as with state__1=state_bf"+ ("" if mi.phaseStart[phName]=="previousTime" else " with t="+mi.phaseStart[phName])+nl)
 
 #function to run an entire static phase (storeAll->storeAll)
 for mi in modelInfos.values():
@@ -1190,7 +1247,7 @@ for mi in modelInfos.values():
             revd=[]
             for ci in ph.values():#order is "just as it comes" (TODO make sure dict does not mess up the order)
                 revd=[ci.name]+revd
-                convCode(mi, ci, "Ordinary")  # write calc's code, this case a storeAll->storeAll fn
+                convCode(mi, ci, CALCCODE)  # write calc's code, this case a storeAll->storeAll fn
             call="storeAll"
             for fn in revd:#call of call of...
                 call=fn+"("+call+")"
@@ -1221,7 +1278,7 @@ for mi in modelInfos.values():
             while whoCallsWhom != {}:
                 for (caller, callees) in whoCallsWhom.items():
                     if callees == []:  # first calc with no ancestors
-                        convCode(mi,ph[caller],"Ordinary")#write calc's code
+                        convCode(mi,ph[caller],CALCCODE)#write calc's code
                         for l in whoCallsWhom.values():  # remove this from its users
                             if l.__contains__(caller):
                                 l.remove(caller)
@@ -1285,7 +1342,7 @@ for mi in modelInfos.values():
 #function to do rebasing inner loop and w/a calcs
 for mi in modelInfos.values():
     off.write("let calcRebasedResults_"+mi.name+"(as:state_"+mi.name+"_all) (storeAll:*[][]f32) :*[][]f32"+nl)#discard the state, only interested in the store-all
-    bn = 0#loop through rebased bases
+    bn = 0#loop through rebased bases, if there are any
     off.write("let storeAll0=storeAll\n")
     if mi.dataFieldInfos[mi.termField].expression == "":
         tbit="d"
@@ -1296,10 +1353,20 @@ for mi in modelInfos.values():
             bn+=1
             off.write("let as"+str(bn)+"=as with basisNum="+str(bn)+nl)
             off.write("\tlet (_,storeAll'"+str(bn)+")= runNPeriods_"+mi.name+"_phase1 (as."+tbit+"."+mi.termField+"-as.t+1) as"+str(bn)+" storeAll"+str(bn-1)+nl)#call projection for rebased calcs
-    #place functions - as with NR, assume that the functions can deal with multiple bases (all the rebased bases) at once
-    #problem: not quite the same as NR as here we assume we calculate one time's value albeit from whole arrays
-    #Maybe alter codeConv so it produces a slightly different function for rebased???
-    off.write("in\n")
+    if bn>0:
+        ph = mi.phases["phase1"]
+        revd = []
+        for ci in ph.values():
+            if ci.isRebase and ci.isWholeArray:  # place functions - as with NR, assume that the functions can deal with multiple bases (all the rebased bases) at once
+                revd = [ci.name] + revd
+                convCode(mi, ci, CALCCODE)  # write calc's code, this case a storeAll->storeAll fn
+        call = "storeAll"+str(bn)
+        for fn in revd:  # call of call of...
+            call = fn + "(" + call + ")"
+        off.write("storeAllPostRebase = " + call + nl)
+        off.write("in storeAllPostRebase\n")
+    else:
+        off.write("in storeAll\n")
 
 #function to run experience basis (phase 1).  Look like runNPeriods but also calls calcRebased... if it's a rebase time
 off.write("let runExperince_"+mi.name+" (as:state_"+mi.name+"_all) (storeAll:*[][]f32) (n:i32):(state_"+mi.name+"_all,*[][]f32)="+nl)
@@ -1334,6 +1401,30 @@ if hasPhase0:
     initPhase="phase0"
 else:
     initPhase="phase1"
+
+#create a zeroised state explicitly (this is so that all initialisation functions can have the same pattern of using "with"
+off.write("let init_state:state_"+mi.name+"={"+nl)
+comma=""
+for (phName, ph) in mi.phases.items():
+    for ci in ph.values():
+        if ci.stores > 0:
+            for fld in ci.fieldsCalcd:
+                if not ci.isArrayed:
+                    off.write(comma+fld+"=0\n")
+                else:
+                    off.write(comma+fld+"=zeros"+("i" if ci.type=="int" else "")+str(ci.numDims)+" "+[str(i)+" " for i in ci.dimSizes]+nl)
+                comma = ","
+off.write("}\n")
+
+#create an all-state explicitly
+off.write("let init_as={\n")
+off.write("p = pol,"+nl)
+off.write("der = der,"+nl)
+off.write("state__1 = init_state,"+nl)
+off.write("t = firstProjectionPeriod,"+nl)
+off.write("basisNum = 0")
+off.write("}\n")
+
 off.write("\tlet init_as_pre"+initPhase+" = init_" + mi.name + "_"+initPhase+"_all "+(" pol " if mi.hasData else "")+(" der " if mi.hasDerived else "")+" 0 storeAll "+ (" scen " if hasESG else "") + "\n")
 off.write("\tlet storeAll_pre"+initPhase+" = init_" + mi.name + "_"+initPhase+"_storeAll "+(" pol " if mi.hasData else "")+(" der " if mi.hasDerived else "")+" 0 storeAll "+ (" scen " if hasESG else "") + "\n")
 
@@ -1363,7 +1454,7 @@ if bn>0:
     for ci in ph.values():  # order is "just as it comes" (TODO make sure dict does not mess up the order)
         if ci.isNonRebase and ci.isWholeArray:
             revd = [ci.name] + revd
-            convCode(mi, ci, "Ordinary")  # write calc's code, this case a storeAll->storeAll fn
+            convCode(mi, ci, CALCCODE)  # write calc's code, this case a storeAll->storeAll fn
     call = "storeAll_postNR"
     for fn in revd:  # call of call of...
         call = fn + "(" + call + ")"
@@ -1387,6 +1478,7 @@ for (phName, ph) in mi.phases.items():
             #TODO this is horribly incomplete
             off.write("let as_pre_phase"+str(phC-1)+"=init_"+mi.name+"_"+phName+" as_post_phase"+str(phC-2)+" storeAllPostPhase"+str(phC-2)+nl)#initialisation from previous phase (all-state and store-all).
             off.write("let (as_post_phase"+str(phC-1)+",storeAllPostPhase"+str(phC-1)+")=runNPeriods_" + mi.name +"_"+phName+" as_pre_phase"+str(phC-1)+" storeAllPostNR"+str(phC-2) + nl)#run phase
+
 #output from run one pol
 results="["
 for (phName, ph) in mi.phases.items():#get output calcs and assemble their 1-d (over time) arrays as a 2-d array
