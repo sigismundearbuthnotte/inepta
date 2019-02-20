@@ -1,25 +1,24 @@
 [basic]
 name=ia1
 arrayed=false
-force=all
-term=termOS//can be either data or derived.  Must be <=lastProjectionPeriod.
+term=termOS//can be either data or derived.  Must be <=lastProjectionPeriod.  From valuation date.
 start=elapsedTime//similarly.  phase0 rolls back to here (but no earlier than firstprojectionperiod) and phase1 starts from here (but no earlier than firstprojectionperiod).  If absent then use firstProjectionPeriod instead.
 firstProjectionPeriod=-12
 lastProjectionPeriod=600
-batchSizeExternal=1000000
+batchSizeExternal=1000000//used by calling c
 batchSizeInternal=50000
 [end]
 
-//[esg]
-//   riskFreeRate[50]//arrayed1-d
-//   swapVol[20][20]//arrayed 2-d
-//   volCf//scalar
-//[end]
+[esg]
+   riskFreeRate[50]//arrayed1-d
+   swapVol[20][20]//arrayed 2-d
+   volCf//scalar
+[end]
 
 [data]//real, int or enum.  Scalar or arrayed.
 sex:sex[2]
-ageYears:int[2]
-ageMonths:int[2]
+ageYears_d:int[2]
+ageMonths_d:int[2]
 stateOfHealth:health[2]
 pensLevel:hilo
 occ:occ[2]
@@ -47,14 +46,14 @@ valMonth=12
 [end]
 
 [derived]//scalar or arrayed, one line formula only (allows line continuation) - any bigger: needs a calc.  Could be the term field
-termOS:int=maxAge*12-(maxi (ageYears[0]*12+ageMonths[0]) (ageYears[1]*12+ageMonths[1]))
-GMPplusplus:real[5]=GMP*1.01
+termOS:int=maxAge*12-maxi(ageYears[0]*12+ageMonths[0],ageYears[1]*12+ageMonths[1])
+GMPplusplus:real[5]=GMP[i1]*1.01//dummy array derived  TODO: need to add implicit array indices for data fields
 [end]
 
 [phase]
 name=phase0
 direction=backwards//ignored for phase0
-start=0//phase 0 always start at 0
+start=0//phase 0 always starts at 0 and ends at start field (but no earlier than firstprojectionperiod)
 ###
 backThing=
 return t
@@ -66,10 +65,7 @@ start=firstProjectionPeriod//could be 1, or anything
 //start=previousTime
 direction=forwards//ignored for phase1
 
-//###//scalar scalar stores none
-
-###,store=1//scalar tuple stores 1
-//scalar tuple stores all
+###store=2,type=int//scalar tuple stores 1
 initialise=(valYear,valMonth)
 (calYear,calMonth)=
     cm0=calMonth__1+1
@@ -77,7 +73,7 @@ initialise=(valYear,valMonth)
     cm=if cm0<=12 then cm0 else 1
 return (cy,cm)
 
-###,store=0,type=real[2]//arrayed stores none
+###store=0,type=real[2]//arrayed stores none
 qx=
 age=ageYears
 qx_ann=tbl_mort_sch[basisNum,scheme,sex,age,calYear]*
@@ -86,36 +82,35 @@ qx_ann=tbl_mort_sch[basisNum,scheme,sex,age,calYear]*
     tbl_mort_pub[age,sector]*tbl_mort_smk[age,smoker]
 return 1-(1-qx_ann)**(1.0/12.0)
 
-//###//scalar-scalar stores 1 
-
-//###//scalar-scalar stores all
-
-###,store=1,type=int[2]//array stores 1
-initialise=ageMonths//initialise can only be from data, derived common or tables, so no ambiguity here
+###store=1,type=int[2]//array stores 1
+initialise=ageMonths_d
 ageMonths=
 am0=ageMonths__1+1
 return if am0<=11 then am0 else 0
 
-###,store=1,type=int[2]//array stores 1
-initialise=ageYears
+###store=1,type=int[2]//array stores 1
+initialise=ageYears_d
 ageYears=
 if ageMonths!=0 then ageYears__1 else ageYears__1+1
 
-###,store=1,type=real[2]//array stores 1
+###store=1,type=real[2]//array stores 1
 initialise=1
 survCF=
 return survCF__1*(1-qx)
 
-###,__NR//either output or NR implies store-all
-//initialise=42
-cflowForRsvs=
+###__NR1//either output or NR implies store-all  NR1 means ordinary calc but stored multiple time (per basis) - not a whole-array
+cflowForNR=
 return cflow
 
-###,output//either output or NR implies store-all
+###__R1//either output or NR implies store-all
+cflowForR=
+return cflow
+
+###output//either output or NR implies store-all
 cflow=
 return totalPension*survCF_LS
 
-###,__NR//NR implies s/a
+###__NR1//NR implies s/a
 survCF_LSForRsvs=
 return survCF_LS
 
@@ -123,62 +118,44 @@ return survCF_LS
 survCF_LS=
 return survCF[0]+survCF[1]-survCF[0]*survCF[1]
 
-###,output,type=real[NR],overwrites=unadjdRsvs//arrayed over NR bases, calculated in experience, overwrites another calc (e.g. the one from which it is calcuated)
-//initialise=42
+###output,type=real[NR],overwrites=unadjdRsvs//arrayed over NR bases, calculated in experience, overwrites another calc (e.g. the one from which it is calcuated)
 rsvsNR=
 res=
 if basisNum!=0 then
-    0
+    0//only valid on experience basis
 else
-    unadjdRsvs/survCF_LSForRsvs*survCF_LS
+    unadjdRsvs/survCF_LSForRsvs*survCF_LS//NB: if we had wanted to specify indices then it's [][] for arrays.  Can miss out both or array-index, not time.
 return res
 
-###,output//same as preceding, but explicitly calculating a single value, useful if e.g certain NR reserves have slightly different calcs
+###output//same as preceding, but explicitly calculating a single value, useful if e.g certain NR reserves have slightly different calcs
 rsvsUK=
 res=
 if basisNum!=0 then
     0
 else
-    unadjdRsvs[t][basisRsvUK]/survCF_LSForRsvs[t][basisRsvUK]*survCF_LS
+    unadjdRsvs[t][RsvUK_disc1]/survCF_LSForRsvs[t][RsvUK_disc1]*survCF_LS
 return res
 
-###,output//same as preceding, but explicitly calculating a single value, useful if e.g certain NR reserves have slightly different calcs
+###output//same as preceding, but explicitly calculating a single value, useful if e.g certain NR reserves have slightly different calcs
 rsvsS2=
 res=
 if basisNum!=0 then
     0
 else
-    unadjdRsvs[t][basisRsvS2]/survCF_LSForRsvs[t][basisRsvS2]*survCF_LS
+    unadjdRsvs[t][RsvS2]/survCF_LSForRsvs[t][RsvS2]*survCF_LS
 return res
 
-###,__NR,overwrites=cflowForRsvs//store-all calculated (w/a calc) per NR instance from other store-alls, overwrites existing s/a.  
+###__NR2,overwrites=cflowForNR//store-all calculated (w/a calc) per NR instance from other store-alls, overwrites existing s/a.  
 //only 1 formula because each bit overwrites
 //the overwriting is carried out by the function anyway, the overwrites statement is to get the indexing correct i.e. references in experience to unadjrsvs will be to the same indices as cflow had in the s/a array (and does not create separate slots for unadjdrsvs)
 unadjdRsvs=
-return backDisc2 cflowForRsvs vs//note that user has to supply the "2" and slice the arrays/tables appropriately
+return backDisc2(cflowForNR,vs)//note that user has to supply the "2" and slice the arrays/tables appropriately
     //otherFunction2 cflow[i_rsvsUK_disc1:i_rsvsUK_disc3] vs[0:1]//note that user has to supply the "2" and slice the arrays/tables appropriately
     //otherFunctionEntirely1 cflow[2:3] vs[2:3]//note that user has to supply the "2" and slice the arrays/tables appropriately
 
-###,__R//rebased calculation.  Run forward at rebase times for each R basis and do a w/a calculation (producng a scalar) on the results for bases and subbases.  All very primitive again.  No overwriting.
+###__R2//rebased calculation.  Run forward at rebase times for each R basis and do a w/a calculation (producng a scalar) on the results for bases and subbases.  All very primitive again.  No overwriting.
 rsvsRebased=
-return sumprod  cflow[t:] tbl_vs[i1_subbasis,t:]
-
-//R and NR cannot be arrayed (except over bases).  The main difference is that we have 1 copy of an s/a but multiple (over bases) for NR/R
-//4 types of NR:
-//- calculated per instance of NR (e.g. cflow)  NR  (indexed over bases only)
-//- processed as w/a calc per NR (e.g unadjRsvs) __NR  overwrites/not  (indexed over bases AND subbases).  It's up the user to fill/overwrite using various functions/calls to functions.  This will be very "manual" and user will need to supply the NR indices and slices thereof.
-//- arrayed over NR in experience [NR] (bases and subbases)
-//- not arrayed over NR in experience, refers to NR bases explictly
-//indices generated: NRind__basis_subbasis e.g. NRind__RsvsUK__disc1.  These follow the order of the setup of the (sub)basis. Can also refer separately,if required e.g. NRind__disc1
-//If referring to the current index (i1) can also refer to its parts i1_basis, i1_subbasis. So if there are two bases followed by a basis with 3 subbases, i1=4 gives i1_basis=2 and i1_subbasis=2 (indexing from 0)
-//Rebased
-//- w/a calculated by rebasing per rebased basis R
-//arrayed over [R]
-//indices Rind etc. Note all rebased will be placed after all NRs.
-
-//NB store-all can be arrayed or NR/R but not both
-//normal s/a: x,x[5],x__1,x__1[5]
-//NR/R: x__R,x[i_rsvsUK_disc1],x__1__R,x__1[i_rsvsUK_disc3].  Excuding the __R implies the experience basis.  No need for NR/R if referring to the index explicitly - as use of index implies NR/R.
+return backDiscSingle1(cflowForR,tbl_vs t)
 [end]
 
 [phase]
@@ -187,7 +164,7 @@ direction=static//extra w/a array calcs (in addition to NR at end of phase1)
 //start makes no sense here
 ###//whole-array calculation (not related to bases).  Can only appear in static phase and all formula in static phase are w/a
 zog=
-return someArrayFunction(somethingElse)
+return interp(rsvsS2)
 [end]
 
 [phase]
@@ -200,14 +177,14 @@ return t
 [end]
 
 [tables]
-name=mort_sch=(basis=suffix,scheme,gender,int,int)
-name=mort_smoker=(smoker,int)
-name=mort_mainlife=(mainLife,int)
-name=mort_health=(health,int)
-name=mort_hilo=(pens,int)
-name=mort_occ=(occ,int)
-name=mort_sector=(sector,int)
-name=mort_postcode=(poCode,int)
-name=sch_info=(int,int)
-name=vs=(int)
+name=mort_sch,basis=suffix,dims=(scheme,sex,int,int)
+name=mort_smoker,dims=(smoker,int)
+name=mort_mainlife,dims=(ml,int)
+name=mort_health,dims=(health,int)
+name=mort_hilo,dims=(hilo,int)
+name=mort_occ,dims=(occ,int)
+name=mort_sector,dims=(sector,int)
+name=mort_postcode,dims=(poCode,int)
+name=sch_info,dims(int0,int0)//int0 means has an LB of zero so can ignore deduction of LB in code
+name=vs,dims=(int,int)
 [end]
