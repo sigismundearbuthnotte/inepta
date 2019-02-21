@@ -16,7 +16,6 @@ let prod(x:[]f32):f32=reduce (*) 1f32 x
 let sumprod(x:[]f32)(y:[]f32):f32=sum1 (map2 (*) x y )
 let cumsum(x:[]f32):[]f32=scan (+) 0 x
 let cumprod(x:[]f32):[]f32=scan (*) 1 x
-let interp(x:[]f32):[]f32=x -- this is a dummy
 let maxi=i32.max
 let maxr=f32.max
 let mini=i32.min
@@ -103,3 +102,6 @@ let backDisc3 [n] (storeAll:*[][n]f32) (inds:[]i32) (v:[][]f32) :*[][n]f32=
 --just calculate single discounted value hence use sumprod - simpler (and hopefully more efficient than a loop)  NB: overwites its source
 let backDiscSingle1 [n] (storeAll:*[][n]f32) (ind:i32) (v:[][]f32) (t:i32)   :*[][n]f32=
     storeAll with [ind,t]= sumprod  storeAll[ind,t:] v[ind,t:]
+
+let interp [n] (storeAll:*[][n]f32) (indSource:i32)  (indTarget:i32) :*[][n]f32= --this is a dummy: it's supposed to interpolate indSource and place the result in indTarget
+    =storeAll

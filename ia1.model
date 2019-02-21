@@ -47,14 +47,14 @@ valMonth=12
 
 [derived]//scalar or arrayed, one line formula only (allows line continuation) - any bigger: needs a calc.  Could be the term field
 termOS:int=maxAge*12-maxi(ageYears[0]*12+ageMonths[0],ageYears[1]*12+ageMonths[1])
-GMPplusplus:real[5]=GMP[i1]*1.01//dummy array derived  TODO: need to add implicit array indices for data fields
+GMPplusplus:real[5]=GMP*1.01//dummy array derived  TODO: need to add implicit array indices for data fields
 [end]
 
 [phase]
 name=phase0
 direction=backwards//ignored for phase0
 start=0//phase 0 always starts at 0 and ends at start field (but no earlier than firstprojectionperiod)
-###
+###store=1
 backThing=
 return t
 [end]
@@ -106,7 +106,7 @@ return cflow
 cflowForR=
 return cflow
 
-###output//either output or NR implies store-all
+###output
 cflow=
 return totalPension*survCF_LS
 
@@ -119,6 +119,7 @@ survCF_LS=
 return survCF[0]+survCF[1]-survCF[0]*survCF[1]
 
 ###output,type=real[NR],overwrites=unadjdRsvs//arrayed over NR bases, calculated in experience, overwrites another calc (e.g. the one from which it is calcuated)
+initialise=42+i1
 rsvsNR=
 res=
 if basisNum!=0 then
@@ -128,6 +129,7 @@ else
 return res
 
 ###output//same as preceding, but explicitly calculating a single value, useful if e.g certain NR reserves have slightly different calcs
+initialise=43
 rsvsUK=
 res=
 if basisNum!=0 then
@@ -137,6 +139,7 @@ else
 return res
 
 ###output//same as preceding, but explicitly calculating a single value, useful if e.g certain NR reserves have slightly different calcs
+initialise=44
 rsvsS2=
 res=
 if basisNum!=0 then
@@ -164,7 +167,10 @@ direction=static//extra w/a array calcs (in addition to NR at end of phase1)
 //start makes no sense here
 ###//whole-array calculation (not related to bases).  Can only appear in static phase and all formula in static phase are w/a
 zog=
-return interp(rsvsS2)
+return interp(rsvsS2,zog)
+###
+bumble=
+return interp(rsvsUK,bumble)
 [end]
 
 [phase]
