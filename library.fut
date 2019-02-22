@@ -68,7 +68,7 @@ let backDisc1 (v:[]f32) (PVs:*[]f32) (cflow:[]f32):*[]f32= -- deprecated, does o
 --2 arrays; pass store-all in plus rows thereof to alter.  NB: overwites its source
 let backDisc2 [n] (storeAll:*[][n]f32) (inds:[]i32) (v:[][]f32) :*[][n]f32=
     let i1=inds[0]
-    let i2=inds[1]
+    let i2=inds[mini 1 (len(inds)-1)]
     let discd=
     if n==0 then 
         [] 
@@ -76,16 +76,16 @@ let backDisc2 [n] (storeAll:*[][n]f32) (inds:[]i32) (v:[][]f32) :*[][n]f32=
         let (d,_)=
         loop (discd':*[][]f32,t':i32) = (storeAll,(n-1)) while t'>=1i32 do 
             let disc2=discd' with [i1,t'-1] = discd'[i1,t'-1]+discd'[i1,t']*v[i1,t']
-            let disc3=disc2 with [i2,t'-1] = disc2[i2,t'-1]+disc2[i2,t']*v[i2,t']
+            let disc3=if len(inds)==2 then disc2 with [i2,t'-1] = disc2[i2,t'-1]+disc2[i2,t']*v[i2,t'] else disc2
             in (disc3,(t'-1))
         in d
     in discd
 
---3 arrays; pass store-all in plus rows thereof to alter  NB: overwites its source
+--max 3 arrays; pass store-all in plus rows thereof to alter  NB: overwites its source
 let backDisc3 [n] (storeAll:*[][n]f32) (inds:[]i32) (v:[][]f32) :*[][n]f32=
     let i1=inds[0]
-    let i2=inds[1]
-    let i3=inds[2]
+    let i2=inds[mini 1 (len(inds)-1)]
+    let i3=inds[mini 2 (len(inds)-1)]
     let discd=
     if n==0 then 
         [] 
@@ -93,8 +93,8 @@ let backDisc3 [n] (storeAll:*[][n]f32) (inds:[]i32) (v:[][]f32) :*[][n]f32=
         let (d,_)=
         loop (discd':*[][]f32,t':i32) = (storeAll,(n-1)) while t'>=1i32 do 
             let disc2=discd' with [i1,t'-1] = discd'[i1,t'-1]+discd'[i1,t']*v[i1,t']
-            let disc3=disc2 with [i2,t'-1] = disc2[i2,t'-1]+disc2[i2,t']*v[i2,t']
-            let disc4=disc3 with [i3,t'-1] = disc3[i3,t'-1]+disc3[i3,t']*v[i3,t']
+            let disc3=if len(inds)>=2 then disc2 with [i2,t'-1] = disc2[i2,t'-1]+disc2[i2,t']*v[i2,t'] else disc2
+            let disc4=if len(inds)>=3 then disc3 with [i3,t'-1] = disc3[i3,t'-1]+disc3[i3,t']*v[i3,t'] else disc3
             in (disc4,(t'-1))
         in d
     in discd
@@ -102,6 +102,15 @@ let backDisc3 [n] (storeAll:*[][n]f32) (inds:[]i32) (v:[][]f32) :*[][n]f32=
 --just calculate single discounted value hence use sumprod - simpler (and hopefully more efficient than a loop)  NB: overwites its source
 let backDiscSingle1 [n] (storeAll:*[][n]f32) (ind:i32) (v:[][]f32) (t:i32)   :*[][n]f32=
     storeAll with [ind,t]= sumprod  storeAll[ind,t:] v[ind,t:]
+
+let backDiscSingle3 [n] (storeAll:*[][n]f32) (inds:[]i32) (v:[][]f32) (t:i32)   :*[][n]f32=
+    let i1=inds[0]
+    let i2=inds[mini 1 (len(inds)-1)]
+    let i3=inds[mini 2 (len(inds)-1)]
+    sa1=storeAll with [i1,t]= (sumprod  storeAll[i1,t:] v[i1,t:])  
+    sa2= if len(inds)>=2 then sa1 with [i2,t]= (sumprod  storeAll[i2,t:] v[i2,t:]) else sa1  
+    sa3 = if len(inds)>=3 then sa2 with [i3,t]= (sumprod  storeAll[i3,t:] v[i3,t:])  else sa2
+    in sa3
 
 let interp [n] (storeAll:*[][n]f32) (indSource:i32)  (indTarget:i32) :*[][n]f32= --this is a dummy: it's supposed to interpolate indSource and place the result in indTarget
     =storeAll

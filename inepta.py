@@ -9,7 +9,8 @@ def doErr(errStr,infoStr):
 
 #constants
 nl="\n"
-userDefinedFns={"real","exp","sqrt","log","sum","prod","zeros1","zeros2","zeros3","backDisc1","backDisc2","backDisc3","sumprod","sum1","sum2","cumprod","cumsum","udne","interp","maxi","maxr"}
+userDefinedFns={"real","exp","sqrt","log","sum","prod","zeros1","zeros2","zeros3","backDisc1","backDisc2","backDisc3","sumprod","sum1","sum2","cumprod","cumsum","udne", \
+                "interp","maxi","maxr","backDiscSingle1","backDiscSingle3","backDiscSingle2"}
 multiBracket={}#lots of []
 br="[]"
 multiBracket[0]=""
@@ -413,6 +414,7 @@ sbVals={}#subbasis name->list of enum values
 inSubBase=False
 numScens=0
 numInnerScens=0
+firstRebasedBasis=0
 for l in ift.readlines():
     (ls,c,lsu)=nwscap(l,",=")
     if c:
@@ -461,6 +463,8 @@ for l in ift.readlines():
                 for i in range(1,len(ls)):
                     if lsu[i]=="REBASED":
                         bi.isRebase=lsu[i+1]=="TRUE"
+                        if bi.isRebase and firstRebasedBasis==0:
+                            firstRebasedBasis=numActualBases
                     if lsu[i] == "SUBBASE":
                         bi.subBases = sbVals[ls[i+1]]
                         numSBs=bi.subBases.__len__()
@@ -796,10 +800,24 @@ def convCode(mi,ci,codeType):#print converted code and return the expression to 
                                 if not ci2.isArrayed and not ci2.isNonRebase and not ci2.isRebase:
                                     stri="i_"+mi.name+"_"+ci2.name#scalar
                                     ep=x.end()
-                                elif x.group()[-1]!="[":
-                                    ind="i_"+mi.name+"_"+ci2.name
-                                    stri="(steps "+ind+" ("+ind+"_end-"+ind+"+1) 1)"#all array
-                                    ep=x.end()
+                                elif x.group()[-1]!="[":#no index
+                                    if not ci2.isNonRebase and not ci2.isRebase:#not a __NR2/__R2
+                                        ind="i_"+mi.name+"_"+ci2.name
+                                        stri="(steps "+ind+" ("+ind+"_end-"+ind+"+1) 1)"#all array
+                                        ep=x.end()
+                                    else:#it's __NR2/__R2: the default in this case is for the range of the basis (plus subbases, if they exist) - not the whole calc - need an if..then bacause the NR/R basis will have different numbers of subbases
+                                        stri="i_"+mi.name+"_"+ci2.name+"+.("
+                                        bn=0
+                                        elsie=""
+                                        bnr=0
+                                        for b in bases.values():
+                                            if (ci2.isRebase and b.isRebase) or  (ci2.isNonRebase and not b.isRebase):
+                                                stri+=elsie+"if as.basisNum=="+str(bn)+" then ("+str(bnr)+"..."+(str(bnr) if b.subBases == [] else str(bnr+len(b.subBases)-1))+")\n"
+                                                elsie=" else "
+                                                bnr += (1 if b.subBases == [] else len(b.subBases))
+                                            bn += (1 if b.subBases == [] else len(b.subBases))
+                                        stri+="else [0])"#dummy, in case there's only 1 rebased basis
+                                        ep=x.end()
                                 else:
                                     #one particular element, or range
                                     elt=""
@@ -878,7 +896,7 @@ for mi in modelInfos.values():
 #rebase times
 off.write("\nlet rbtrue=replicate (length rebaseTimes) true" + nl)
 off.write("let rbts:*[]bool = replicate numPeriods" + " false " + nl)
-off.write("let isRebaseTime:*[]bool=scatter rbts rebaseTimes rbtrue\n")
+off.write("let isRebaseTime:*[]bool=(replicate (-firstprojectionperiod) false)++(scatter rbts rebaseTimes rbtrue)\n")#NB add falses to front for -ve start times
 
 #data-record types
 off.write(nl)
@@ -1315,12 +1333,12 @@ for mi in modelInfos.values():
                         else:
                             for dim in range(0,ci.dimSizes[0]):
                                 off.write("\t with [i_" + mi.name + "_" + ci.name + "+"+str(dim)+",as.i_t]=" + ci.name+"["+str(dim)+"]"+nl)
-                    if ci.stores ==-1 and ci.isNonRebase and not ci.isWholeArray and b.name!="Experience" and not b.isRebase:#put __NRs in correct slots, this just for the basis (i,e. first subbasis) not the remaining subbases
+                    if ci.stores ==-1 and ci.isNonRebase and not ci.isWholeArray and b.name!="Experience" and not b.isRebase:#put __NRs in correct slots, including allowing for  subbases
                         for sb in range(0,(len(b.subBases) if b.subBases!=[] else 1)):#loop through subbases, if any
                             off.write("\t with [i_" + mi.name + "_" + ci.name+"+as.basisNum+"+str(sb) + ",as.i_t]=" + ci.name+nl)
-                    #TODO: rebased similarly?
-                    #if ci.stores ==-1 and ci.isRebase and not ci.isWholeArray and storeWhat==2:#put __Rs in correct slots
-                    #    pass
+                    if ci.stores ==-1 and ci.isRebase and not ci.isWholeArray and b.name!="Experience" and b.isRebase:#put __Rs in correct slots, including allowing for  subbases
+                        for sb in range(0,(len(b.subBases) if b.subBases!=[] else 1)):#loop through subbases, if any
+                            off.write("\t with [i_" + mi.name + "_" + ci.name+"+as.basisNum-"+str(firstRebasedBasis)+"+"+str(sb) + ",as.i_t]=" + ci.name+nl)
             off.write(nl)
             off.write("in (asNew,storeAllNew)"+nl)
             off.write("in store as storeAll\n")#return from runOnePeriod
@@ -1329,43 +1347,50 @@ for mi in modelInfos.values():
 for mi in modelInfos.values():
     for (phName,ph) in mi.phases.items():
         if mi.phaseDirections[phName]!="static":
-            off.write("let  runNPeriods_"+mi.name+"_"+phName+"(n:i32) (as:state_"+mi.name+"_all) (storeAll:*[][]f32):")
+            off.write(nl)
+            off.write("let  runNPeriods_"+mi.name+"_"+phName+" (n:i32) (as:state_"+mi.name+"_all) (storeAll:*[][]f32):")
             off.write(" (state_" + mi.name + "_all,*[][]f32)=" + nl)
             off.write("\tloop (as':state_"+mi.name+"_all,storeAll':*[][]f32)=\n")
             off.write("\t(as,storeAll) for i<n do\n")
-            off.write("\trunOnePeriod_"+mi.name+"_"+phName+"as' storeAll'"+nl)
+            off.write("\trunOnePeriod_"+mi.name+"_"+phName+" as' storeAll'"+nl)
 
-#functions to do NR runs: phase 1 runNPeriod.  The latter also stores the __NR1 calcs in the correct place in s/a
+#functions to do NR runs: phase 1 runNPeriod.  The latter also stores the __NR1 calcs in the correct place in s/a (in the store function)
 for mi in modelInfos.values():
-    off.write("let runNRBasis_"+mi.name+"(as:state_"+mi.name+"_all) (storeAll:*[][]f32) (bn:i32):*[][]f32"+nl)#discard the state, only interested in the store-all
+    off.write(nl)
+    off.write("let runNRBasis_"+mi.name+" (as:state_"+mi.name+"_all) (storeAll:*[][]f32) (bn:i32):*[][]f32"+nl)#discard the state, only interested in the store-all
     off.write("\tlet as2=as with basisNum=bn\n")
     if mi.dataFieldInfos[mi.termField].expression=="":
-        off.write("\tlet (_,storeAll')= runNPeriods_"+mi.name+"_phase1 as.d."+mi.termField+" as2 storeAll"+nl)
+        off.write("\tlet (_,storeAll')= runNPeriods_"+mi.name+"_phase1 as.d."+mi.termField+"-"+mi.phaseStart["phase1"]+" as2 storeAll"+nl)
     else:
-        off.write("\tlet (_,storeAll')= runNPeriods_"+mi.name+"_phase1 as.der."+mi.termField+" as2 storeAll"+nl)
+        off.write("\tlet (_,storeAll')= runNPeriods_"+mi.name+"_phase1 as.der."+mi.termField+"-"+mi.phaseStart["phase1"]+" as2 storeAll"+nl)
+    off.write(" in storeAll'\n")
 
 #function to do rebasing inner loop and w/a calcs
 for mi in modelInfos.values():
-    off.write("let calcRebasedResults_"+mi.name+"(as:state_"+mi.name+"_all) (storeAll:*[][]f32) :*[][]f32"+nl)#discard the state, only interested in the store-all
+    off.write(nl)
+    off.write("let calcRebasedResults_"+mi.name+" (as:state_"+mi.name+"_all,storeAll:*[][]f32) :*[][]f32"+nl)#discard the state, only interested in the store-all.  NB: takes tuple as it receives results of runOnePeriod
     bn = 0#loop through rebased bases, if there are any
     off.write("let storeAll0=storeAll\n")
     if mi.dataFieldInfos[mi.termField].expression == "":
         tbit="d"
     else:
         tbit="der"
-    for b in bases:
+    bn=0
+    bnr=0
+    for b in bases.values():
         if b.isRebase:
-            bn+=1
-            off.write("let as"+str(bn)+"=as with basisNum="+str(bn)+nl)
-            off.write("\tlet (_,storeAll'"+str(bn)+")= runNPeriods_"+mi.name+"_phase1 (as."+tbit+"."+mi.termField+"-as.t+1) as"+str(bn)+" storeAll"+str(bn-1)+nl)#call projection for rebased calcs
-    if bn>0:
+            bnr+=1
+            off.write("let as"+str(bnr)+"=as with basisNum="+str(bn)+nl)
+            off.write("\tlet (_,storeAll"+str(bnr)+")= runNPeriods_"+mi.name+"_phase1 (as."+tbit+"."+mi.termField+"-as.t+1) as"+str(bnr)+" storeAll"+str(bnr-1)+nl)#call projection for rebased calcs
+        bn += (len(b.subBases) if len(b.subBases)>0 else 1)
+    if bnr>0:
         ph = mi.phases["phase1"]
         revd = []
         for ci in ph.values():
             if ci.isRebase and ci.isWholeArray:  # place functions - as with NR, assume that the functions can deal with multiple bases (all the rebased bases) at once
                 revd = [ci.name] + revd
                 convCode(mi, ci, CALCCODE)  # write calc's code, this case a storeAll->storeAll fn
-        call = "storeAll"+str(bn)
+        call = "storeAll"+str(bnr)
         for fn in revd:  # call of call of...
             call = fn + "(" + call + ")"
         off.write("storeAllPostRebase = " + call + nl)
@@ -1374,23 +1399,22 @@ for mi in modelInfos.values():
         off.write("in storeAll\n")
 
 #function to run experience basis (phase 1).  Look like runNPeriods but also calls calcRebased... if it's a rebase time
-off.write("let runExperince_"+mi.name+" (as:state_"+mi.name+"_all) (storeAll:*[][]f32) (n:i32):(state_"+mi.name+"_all,*[][]f32)="+nl)
-off.write(" (state_" + mi.name + "_all,*[][]f32)=" + nl)
+off.write("\nlet runExperience_"+mi.name+" (as:state_"+mi.name+"_all) (storeAll:*[][]f32) (n:i32):(state_"+mi.name+"_all,*[][]f32)="+nl)
 off.write("\tloop (as':state_" + mi.name + "_all,storeAll':*[][]f32)=\n")
 off.write("\t(as,storeAll) for i<n do\n")
-off.write("\tif !isRebaseTime[as.t+1] then"+nl)
+off.write("\tif !isRebaseTime[as.i_t+1] then"+nl)
 off.write("\trunOnePeriod_" + mi.name + "_phase1 as' storeAll'" + nl)
 off.write("\telse\n")
-off.write("\tcalcRebaseResults_"+mi.name+"(runOnePeriod_" + mi.name + "_phase1 as' storeAll')" + nl)
+off.write("\tcalcRebasedResults_"+mi.name+"(runOnePeriod_" + mi.name + "_phase1 as' storeAll')" + nl)
 
 # main function for running a single policy (independent)
 # signature
-for mi in modelInfos:#only 1 model
+for mi in modelInfos.values():#only 1 model
     break
 off.write(nl)
 off.write("\nlet runOnePol_" + mi.name)
 if hasESG:
-    off.write("(scen:oneScen) ")
+    off.write(" (scen:oneScen) ")
 if mi.hasData:
     off.write("(pol:data_" + mi.name + ") ")
 if mi.hasDerived:
@@ -1408,7 +1432,7 @@ else:
     initPhase="phase1"
 
 #create a zeroised state explicitly (this is so that all initialisation functions can have the same pattern of using "with"
-off.write("let init_state:state_"+mi.name+"={"+nl)
+off.write("\nlet init_state:state_"+mi.name+"={"+nl)
 comma=""
 for (phName, ph) in mi.phases.items():
     for ci in ph.values():
@@ -1417,12 +1441,12 @@ for (phName, ph) in mi.phases.items():
                 if not ci.isArrayed:
                     off.write(comma+fld+"=0\n")
                 else:
-                    off.write(comma+fld+"=zeros"+("i" if ci.type=="int" else "")+str(ci.numDims)+" "+[str(i)+" " for i in ci.dimSizes]+nl)
+                    off.write(comma+fld+"=zeros"+("i" if ci.type=="int" else "")+str(ci.numDims)+" "+"".join([str(i)+" " for i in ci.dimSizes])+nl)
                 comma = ","
 off.write("}\n")
 
 #create an all-state explicitly
-off.write("let init_as={\n")
+off.write("\nlet init_as={\n")
 off.write("p = pol,"+nl)
 off.write("der = der,"+nl)
 off.write("state__1 = init_state,"+nl)
@@ -1430,31 +1454,33 @@ off.write("t = firstProjectionPeriod,"+nl)
 off.write("i_t = 0,"+nl)
 off.write("basisNum = 0")
 off.write("}\n")
+off.write(nl)
 
-off.write("\tlet init_as_pre"+initPhase+" = init_" + mi.name + "_"+initPhase+"_all "+(" pol " if mi.hasData else "")+(" der " if mi.hasDerived else "")+" 0 storeAll "+ (" scen " if hasESG else "") + "\n")
-off.write("\tlet storeAll_pre"+initPhase+" = init_" + mi.name + "_"+initPhase+"_storeAll "+(" pol " if mi.hasData else "")+(" der " if mi.hasDerived else "")+" 0 storeAll "+ (" scen " if hasESG else "") + "\n")
+off.write("let init_as_pre_"+initPhase+" = init_" + mi.name + "_"+initPhase+"_all init_as"+(" scen " if hasESG else "")+" 0 storeAll \n")
+off.write("let storeAll_pre_"+initPhase+" = init_" + mi.name + "_"+initPhase+"_storeAll  0 init_as "+ (" scen " if hasESG else "")+" storeAll \n")
 
-#run phase 0, should it exist
+#run phase 0, should it exist,  TODO; term is fixed: it runs to firstprojectionperiod
 if hasPhase0:
-    off.write("(init_as_post_phase0,storeAll_pre_NR)=runNPeriods_"+mi.name+"_phase0 "+(" pol." if mi.dataFieldInfos[mi.termField].expression=="" else " der.")+mi.termField+" init_as_pre_phase0 storeAll_pre_phase0"+nl)
+    off.write("(init_as_pre_phase1,storeAll_pre_NR)=runNPeriods_"+mi.name+"_phase0 "+" (-firstprojectionperiod) "+" init_as_pre_phase0 storeAll_pre_phase0"+nl)
     #initialise
 
 #run NR bases, bases only: "store" will replicate the calc results over subbases
-bn=0
-for b in bases:
-    if not b.isRebase:
-        if bn==0:
-            off.write("let storeAllNR0=storeAll_pre_NR"+nl)
-        bn+=1
-        off.write("let storeAllNR"+str(bn)+"=runNRBasis_"+mi.name+" init_as_pre_phase1 storeAllNR"+str(bn-1)+" "+str(bn)+nl)
-if bn>0:
-    off.write("let storeAll_postNR=storeAll"+str(bn)+nl)
+bn=1
+sa_c=0
+off.write("let storeAllNR0=storeAll_pre_NR" + nl)
+for b in bases.values():
+    if not b.isRebase and b.name!="Experience":
+        off.write("let storeAllNR"+str(sa_c+1)+"=runNRBasis_"+mi.name+" init_as_pre_phase1 storeAllNR"+str(sa_c)+" "+str(bn)+nl)
+        bn += (1 if b.subBases==[] else len(b.subBases))
+        sa_c+=1
+if bn>1:
+    off.write("let storeAll_postNR=storeAllNR"+str(sa_c)+nl)
 else:
     off.write("let storeAll_postNR=storeAll_pre_NR"+nl)
 
 #as in static-phases, generate functions from the __NR2 calcs and apply to the s/a
 #it is assumed that the calc formulae themselves have the ability to cope with bases/subbases
-if bn>0:
+if bn>1:
     revd = []
     ph = mi.phases["phase1"]
     for ci in ph.values():  # order is "just as it comes" (TODO make sure dict does not mess up the order)
