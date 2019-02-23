@@ -46,7 +46,7 @@ valMonth=12
 [end]
 
 [derived]//scalar or arrayed, one line formula only (allows line continuation) - any bigger: needs a calc.  Could be the term field
-termOS:int=maxAge*12-maxi(ageYears[0]*12+ageMonths[0],ageYears[1]*12+ageMonths[1])
+termOS:int=maxAge*12-maxi(ageYears_d[0]*12+ageMonths_d[0],ageYears_d[1]*12+ageMonths_d[1])
 GMPplusplus:real[5]=GMP*1.01//dummy array derived  TODO: need to add implicit array indices for data fields
 [end]
 
@@ -56,7 +56,7 @@ direction=backwards//ignored for phase0
 start=0//phase 0 always starts at 0 and ends at start field (but no earlier than firstprojectionperiod)
 ###store=1
 backThing=
-return t
+return real(t)
 [end]
 
 [phase]
@@ -76,10 +76,10 @@ return (cy,cm)
 ###store=0,type=real[2]//arrayed stores none
 qx=
 age=ageYears
-qx_ann=tbl_mort_sch[basisNum,scheme,sex,age,calYear]*
-    tbl_mort_hi[age,pensLevel]*tbl_mort_hlt[age,stateOfHealth]*
-    tbl_mort_ml[age,mainLife]*tbl_mort_occ[age,occ]*tbl_mort_po[age,poCode]*
-    tbl_mort_pub[age,sector]*tbl_mort_smk[age,smoker]
+qx_ann=mort_sch[scheme,sex,age,calYear]*
+    mort_hilo[pensLevel,age]*mort_health[stateOfHealth,age]*
+    mort_mainlife[mainLife,age]*mort_occ[occ,age]*mort_postcode[poCode,age]*
+    mort_sector[sector,age]*mort_smoker[smoker,age]
 return 1-(1-qx_ann)**(1.0/12.0)
 
 ###store=1,type=int[2]//array stores 1
@@ -119,7 +119,7 @@ survCF_LS=
 return survCF[0]+survCF[1]-survCF[0]*survCF[1]
 
 ###output,type=real[NR],overwrites=unadjdRsvs//arrayed over NR bases, calculated in experience, overwrites another calc (e.g. the one from which it is calcuated)
-initialise=42+i1
+initialise=42.0+real(i1)
 rsvsNR=
 res=
 if basisNum!=0 then
@@ -129,7 +129,7 @@ else
 return res
 
 ###output//same as preceding, but explicitly calculating a single value, useful if e.g certain NR reserves have slightly different calcs
-initialise=43
+initialise=43.0
 rsvsUK=
 res=
 if basisNum!=0 then
@@ -139,7 +139,7 @@ else
 return res
 
 ###output//same as preceding, but explicitly calculating a single value, useful if e.g certain NR reserves have slightly different calcs
-initialise=44
+initialise=44.0
 rsvsS2=
 res=
 if basisNum!=0 then
@@ -152,13 +152,13 @@ return res
 //only 1 formula because each bit overwrites
 //the overwriting is carried out by the function anyway, the overwrites statement is to get the indexing correct i.e. references in experience to unadjrsvs will be to the same indices as cflow had in the s/a array (and does not create separate slots for unadjdrsvs)
 unadjdRsvs=
-return backDisc2(cflowForNR,vs)//note that user has to supply the "2" and slice the arrays/tables appropriately
+return backDisc4(cflowForNR,vs)//note that user has to supply the "2" and slice the arrays/tables appropriately
     //otherFunction2 cflow[i_rsvsUK_disc1:i_rsvsUK_disc3] vs[0:1]//note that user has to supply the "2" and slice the arrays/tables appropriately
     //otherFunctionEntirely1 cflow[2:3] vs[2:3]//note that user has to supply the "2" and slice the arrays/tables appropriately
 
 ###__R2//rebased calculation.  Run forward at rebase times for each R basis and do a w/a calculation (producng a scalar) on the results for bases and subbases.  All very primitive again.  No overwriting.
 rsvsRebased=
-return backDiscSingle1(cflowForR,tbl_vs t)
+return backDiscSingle3(cflowForR,vs,t)
 [end]
 
 [phase]
@@ -179,7 +179,7 @@ direction=backwards//if previous non-static phase was forwards then will fallbac
 start=previousTime//first period is the last period of the most recent non-static phase; initialisation referring to calcs only makes sense with this option
 ###
 backThing2=
-return t
+return real(t)
 [end]
 
 [tables]
@@ -191,6 +191,6 @@ name=mort_hilo,dims=(hilo,int)
 name=mort_occ,dims=(occ,int)
 name=mort_sector,dims=(sector,int)
 name=mort_postcode,dims=(poCode,int)
-name=sch_info,dims(int0,int0)//int0 means has an LB of zero so can ignore deduction of LB in code
-name=vs,dims=(int,int)
+name=sch_info,dims(int,int)//int0 means has an LB of zero so can ignore deduction of LB in code
+name=vs,dims=(int0,int0)
 [end]
