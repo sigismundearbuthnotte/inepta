@@ -5,19 +5,21 @@
 #include <string>
 #include <sstream>
 #include <stdlib.h>
+#include <cstdlib>
 
 using namespace std;
 
-//extern "C" int readTable(const char* fileName,const char* baseSubdir, int numDims,int basisType,int**dimSizes,float **table);
-//extern "C" int readData(const char*fileName,const char* subdir,int numFields,int *intOrReal, int*arraySize,int *numPols,float **tableReal,int **tableInt);
-//extern "C" int readESG(const char*fileName,const char* subdir,int numFields,int*arraySize1,int*arraySize2,int*numPeriods,int*numScens,float**scens);
+extern "C" int readTable(const char* fileName,const char* baseSubdir, int numDims,int*dimSizes,int numBases,const char* bases[],int basisType,float **table,int*lb);
+extern "C" int readData(const char*fileName,const char* subdir,int numFields,int *intOrReal, int*arraySize,int *numPols,float **dataReal,int **dataInt);
+extern "C" int readESG(const char*fileName,const char* subdir,int numScens,int numFields,int*numPeriods,float**scens);
+
 
 const int basisSingle=1;
 const int basisPrefix=2;
 const int basisSuffix=3;
 const int basisSubdir=4;
 
-int readTable(const char* fileName,const char* baseSubdir, int numDims,int*dimSizes,int numBases,const char* bases[],int basisType,float **table)
+int readTable(const char* fileName,const char* baseSubdir, int numDims,int*dimSizes,int numBases,const char* bases[],int basisType,float **table,int*lb)
 {
     string fName,line,lTemp;
     ifstream inFile;
@@ -54,12 +56,32 @@ int readTable(const char* fileName,const char* baseSubdir, int numDims,int*dimSi
     getline(inFile,line);
     while (line[0]!='~')//find block header
         getline(inFile,line);
-    getline(inFile,line);//skip indexing header
+    getline(inFile,line);//indexing header
+    l.clear();
+    l.str(line);//get first column index for lower bound purposes
+    l>>lTemp;
+    char*p;
+    long convI=std::strtol(lTemp.c_str(),&p,10);
+    if (*p)//if successful, p points to NULL end of string, so a "true" values indicates failure
+        lb[1]=0;
+    else
+        lb[1]=(int) convI;
     getline(inFile,line);//first line
 
+    l.clear();
     l.str(line);//get line length
     for (lineLength=0;!l.eof();++lineLength)
+    {
         l>>lTemp;
+        if (lineLength==0)//get first row index for lower bounds
+        {
+            long convI=std::strtol(lTemp.c_str(),&p,10);
+            if (*p)//if successful, p points to NULL end of string, so a "true" value indicates failure
+                lb[0]=0;
+            else
+                lb[0]=(int) convI;
+        }
+    }
     lineLength--;//ignore index at start of line
 
     numLines=1;//count remainder of lines
@@ -181,7 +203,48 @@ int readData(const char*fileName,const char* subdir,int numFields,int *intOrReal
     return 0;
 }
 
-int readESG(const char*fileName,const char* subdir,int numScens,int numFields,int*arraySize1,int*arraySize2,int*numPeriods,float**scens)
+int readESG(const char*fileName,const char* subdir,int numScens,int numFields,int*numPeriods,float**scens)
+//numFields is total number (i.e. adding in array/vector total length)
 {
+    string fName,line,lTemp;
+    ifstream inFile;
+    istringstream l;
+
+    fName=string(subdir)+"/"+string(fileName);
+    inFile.open(fName.c_str());
+    if (!inFile.is_open())
+        return -1;
+
+    getline(inFile,line);
+    while (line[0]!='~')//find block header
+        getline(inFile,line);
+
+    //determine number of periods
+    getline(inFile,line);
+    for (*numPeriods=1;!l.eof()&&line[0]!='~';++(*numPeriods))
+        getline(inFile,line);
+    --(*numPeriods);
+    inFile.close();
+
+    (*scens)=new float[numScens*(*numPeriods)*numFields];
+    int schPos=0;
+    inFile.open(fName.c_str());
+    for (int scen=1;scen<=numScens;++scen)
+    {
+        getline(inFile,line);
+        while (line[0]!='~')//find block header
+            getline(inFile,line);
+        for (int t=0;t<(*numPeriods);++t)
+        {
+            getline(inFile,line);
+            l.clear();
+            l.str(line);
+            int tt;
+            l>>tt;
+            for (int fld=0;fld<numFields;++fld)//incude time
+                l>>(*scens)[schPos++];
+        }
+    }
+    inFile.close();
     return 0;
 }

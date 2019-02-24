@@ -62,7 +62,7 @@ let (+...+) (x:[][][]f32) (y:[][][]f32) = map2 (map2 (map2 (+))) x y
 let backDisc1 (v:[]f32) (PVs:*[]f32) (cflow:[]f32):*[]f32= -- deprecated, does one array at at time - inefficent
     let n=length PVs
     let PVs'=update PVs (n-1) cflow[n-1]
-    let (discd,t)= loop (discd':*[]f32,t':i32) = (PVs',(n-1)) while t'>=1i32 do (discd' with [t'-1] = discd'[t']*v[t']+cflow[t'-1],(t'-1))
+    let (discd,_)= loop (discd':*[]f32,t':i32) = (PVs',(n-1)) while t'>=1i32 do (discd' with [t'-1] = discd'[t']*v[t']+cflow[t'-1],(t'-1))
     in discd
 
 --2 arrays; pass store-all in plus rows thereof to alter.  NB: overwites its source
@@ -115,4 +115,4 @@ let backDiscSingle3 [n] (storeAll:*[][n]f32) (inds:[]i32) (v:[][]f32) (t:i32)   
     in sa3
 
 let interp [n] (storeAll:*[][n]f32) (indSource:i32)  (indTarget:i32) :*[][n]f32= --this is a dummy: it's supposed to interpolate indSource and place the result in indTarget
-    storeAll
+    storeAll with [indTarget]=(copy storeAll[indSource])

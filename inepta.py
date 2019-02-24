@@ -39,6 +39,7 @@ modelSubDir=rootSubDir+"/models"
 exeSubDir=rootSubDir+"/exe"
 outputSubDir=rootSubDir+"/output"
 libSubDir=rootSubDir+"/library"#base subdirectory for tables
+scensSubDir=rootSubDir+"/scenarios"
 
 #dicts, sets etc.
 modelInfos={}#name->modelInfo
@@ -62,7 +63,7 @@ class modelInfo(object):#persistent data for a model
         self.tableInfos={}
         self.hasData=False
         self.hasDerived=False
-        self.esg={}#only top model should have one of these
+        self.esg={}#only top model should have one of these, field name->list of dimension sizes
         self.forceThese=[]#calcs to force
         self.maxStored=0#excluding store-alls
         self.firstProjectionPeriod=1
@@ -421,6 +422,7 @@ inSubBase=False
 numScens=0
 numInnerScens=0
 firstRebasedBasis=0
+scensFile=""
 for l in ift.readlines():
     (ls,c,lsu)=nwscap(l,",=")
     if c:
@@ -433,7 +435,7 @@ for l in ift.readlines():
                 doErr("Unterminated section preceding ", ls[0])
             continue
         if section=="BASIC":
-            if lsu[0] not in set(["MODE","STOCHASTIC","NUMSCENARIOS","NUMINNERSCENARIOS"]):
+            if lsu[0] not in set(["MODE","STOCHASTIC","NUMSCENARIOS","NUMINNERSCENARIOS","FILE"]):
                 doErr("Unknown basic setting for top level model file: ",l)
             if lsu[0]=="MODE":
                 if lsu[1] not in set(["DEPENDENT","INDEPENDENT"]):
@@ -445,6 +447,8 @@ for l in ift.readlines():
                 numScens=int(lsu[1])
             if lsu[0] == "NUMINNERSCENARIOS":
                 numInnerScens = int(lsu[1])
+            if lsu[0] == "FILE":
+                scensFile = lsu[1]
         if section=="SUBBASE":
             if lsu[0]=="NAME":
                 sbVals[ls[1]]=[]
@@ -900,12 +904,12 @@ for enum in enums.values():
 
 #other system constants
 for mi in modelInfos.values():
-    off.write("let firstprojectionperiod=("+str(mi.firstProjectionPeriod)+")"+nl)
-    off.write("let lastprojectionperiod=(" + str(mi.lastProjectionPeriod) + ")" + nl)
-    off.write("let firstProjectionPeriod=("+str(mi.firstProjectionPeriod)+")"+nl)
-    off.write("let lastProjectionPeriod=(" + str(mi.lastProjectionPeriod) + ")" + nl)
-    off.write("let numPeriods=lastProjectionPeriod-firstProjectionPeriod+1" + nl)
-    off.write("let numScens="+str(numScens)+nl)
+    off.write("let firstprojectionperiod:i32=("+str(mi.firstProjectionPeriod)+")"+nl)
+    off.write("let lastprojectionperiod:i32=(" + str(mi.lastProjectionPeriod) + ")" + nl)
+    off.write("let firstProjectionPeriod:i32=("+str(mi.firstProjectionPeriod)+")"+nl)
+    off.write("let lastProjectionPeriod:i32=(" + str(mi.lastProjectionPeriod) + ")" + nl)
+    off.write("let numPeriods:i32=lastProjectionPeriod-firstProjectionPeriod+1" + nl)
+    off.write("let numScens:i32="+str(numScens)+nl)
     numPeriods=mi.lastProjectionPeriod-mi.firstProjectionPeriod+1
     break
 
@@ -1068,20 +1072,20 @@ for mi in modelInfos.values():
                         i_added=True
                         for fld in ci.fieldsCalcd:
                             inds_added[fld]=i_count
-                            off.write("let i_"+mName+"_"+fld+"="+str(i_count)+nl)
+                            off.write("let i_"+mName+"_"+fld+":i32="+str(i_count)+nl)
                         if ci.isRebase:
                             i_count+=numRebased
                         elif ci.isNonRebase:
                             i_count+=numNonRebased
                         else:
                             i_count+=(ci.dimSizes[0] if ci.isArrayed else 1)
-                        off.write("let i_"+mName+"_"+fld+"_end="+str(i_count-1)+nl)
+                        off.write("let i_"+mName+"_"+fld+"_end:i32="+str(i_count-1)+nl)
                     elif inds_added.__contains__(ci.overwrites):
                         i_added=True
-                        off.write("let i_" + mName + "_" + ci.name + "=" + str(inds_added[ci.overwrites]) + nl)
-                        off.write("let i_" + mName + "_" + ci.name + "_end=i_" + mName +"_"+ci.overwrites+"_end" + nl)
+                        off.write("let i_" + mName + "_" + ci.name + ":i32=" + str(inds_added[ci.overwrites]) + nl)
+                        off.write("let i_" + mName + "_" + ci.name + "_end:i32=i_" + mName +"_"+ci.overwrites+"_end" + nl)
                         inds_added[ci.name]=inds_added[ci.overwrites]
-    off.write("let numSAs="+str(i_count)+nl)
+    off.write("let numSAs:i32="+str(i_count)+nl)
 
 #scenario type and conversion function
 hasESG=False
@@ -1135,7 +1139,7 @@ for mi in modelInfos.values():#data files
         off.write("(fileDataInt_"+mi.name+":[numPols][]i32) (fileDataReal_"+mi.name+":[numPols][]f32)")
 for mi in modelInfos.values():#tables and their lower bounds (for (possibly) inner 2 dimensions)
     for t in mi.tableInfos.values():
-        off.write(" (table_"+t.name+"_"+mi.name+":"+("[numBases]" if t.basis!="SINGLE" else "")+multiBracket[len(t.dims)]+"f32) (lb_"+t.name+"_"+mi.name+":[]i32) ")
+        off.write(" (table_"+t.name+"_"+mi.name+":"+("[numBases]" if t.basis!="SINGLE" else "")+multiBracket[len(t.dims)]+"f32)"+(" (lb_"+t.name+"_"+mi.name+":[]i32)" if t.dim1HasLB or t.dim2HasLB else ""))
 off.write(":[][]f32="+nl)
 
 off.write("\nunsafe\n\n")
@@ -1186,8 +1190,9 @@ for mi in modelInfos.values():
 off.write(nl)
 for mi in modelInfos.values():
     for t in mi.tableInfos.values():
-        off.write("let lb_"+t.name+"_"+mi.name+"_1="+(" lb_"+t.name+"_"+mi.name+"[0]" if t.dim2HasLB else "0i32")+nl)
-        off.write("let lb_"+t.name+"_"+mi.name+"_2="+(" lb_"+t.name+"_"+mi.name+"[1]" if t.dim1HasLB else "0i32")+nl)
+        if t.dim2HasLB or t.dim1HasLB:
+            off.write("let lb_"+t.name+"_"+mi.name+"_1="+(" lb_"+t.name+"_"+mi.name+"[0]" if t.dim2HasLB else "0i32")+nl)
+            off.write("let lb_"+t.name+"_"+mi.name+"_2="+(" lb_"+t.name+"_"+mi.name+"[1]" if t.dim1HasLB else "0i32")+nl)
 off.write(nl)
 
 #get data
@@ -1214,12 +1219,9 @@ for initMode in range(0,2):#ordinary, store-all
             off.write(" (as: state_"+mi.name+"_all) ")
             if hasESG:
                 off.write(" (scen:oneScen) ")
-            if initMode==1:
-                off.write(" (storeAll:*[][]f32) ")
-            else:
-                off.write(" (storeAll:[][]f32) ")#will not consume s/a when setting state, merely use it
+            off.write(" (storeAll:*[][]f32) ")
             if initMode==0:#returns
-                off.write(":state_"+mi.name+"=\n")
+                off.write(":(state_"+mi.name+",*[][]f32)=\n")
             else:
                 off.write(":*[][]f32=\n")
             inited=set()#who was initialised; for with" purposes
@@ -1231,12 +1233,13 @@ for initMode in range(0,2):#ordinary, store-all
                         inited.add(fld)
             if initMode==0:#can always use "with" as we always create a zeroised state before any initialisations
                 if len(inited)!=0:
-                    off.write("\nin as.state__1")
+                    off.write("\nin ((as.state__1")
                     for ci in inited:
                         off.write(" with "+ci+"="+ci)
+                    off.write("),storeAll)")
                     off.write(nl)
                 else:
-                    off.write("\n as.state__1 "+nl)
+                    off.write("\n (as.state__1,storeAll) "+nl)
             else:
                 #storing in store-all; 3 cases: scalar (and that includes __NR, in this case), genuine array
                 off.write("let sa=storeAll\n")
@@ -1262,10 +1265,10 @@ for mi in modelInfos.values():
         if hasESG:
             off.write(" (scen:oneScen) ")
         off.write("( nrBasisNum:i32 )")
-        off.write(" (storeAll:[][]f32) ")
-        off.write(" :state_"+mi.name+"_all  ="+nl)
-        off.write("\tlet state_bf= init_"+ mi.name + "_" + phName+" as "+(" scen " if hasESG else "")+ " storeAll \n")
-        off.write("\tin as with state__1=state_bf"+ ("" if mi.phaseStart[phName]=="previousTime" else " with t="+mi.phaseStart[phName]+" with i_t="+mi.phaseStart[phName]+"-firstprojectionperiod")+nl)
+        off.write(" (storeAll:*[][]f32) ")
+        off.write(" :(state_"+mi.name+"_all,*[][]f32) ="+nl)
+        off.write("\tlet (state_bf,sa)= init_"+ mi.name + "_" + phName+" as "+(" scen " if hasESG else "")+ " storeAll \n")
+        off.write("\tin ((as with state__1=state_bf"+ ("),sa)" if mi.phaseStart[phName]=="previousTime" else " with t="+mi.phaseStart[phName]+" with i_t="+mi.phaseStart[phName]+"-firstprojectionperiod),sa)")+nl)
 
 #function to run an entire static phase (storeAll->storeAll)
 for mi in modelInfos.values():
@@ -1440,7 +1443,7 @@ if mi.hasDerived:
 off.write(":[][]f32 =" + nl)
 
 #Define the store-all array
-off.write("\tlet storeAll:*[][]f32=copy (undef2 numSAs (numPeriods+1))\n")#one extra period for initialisation
+off.write("let storeAll:*[][]f32=copy (undef2 numSAs (numPeriods+1))\n")#one extra period for initialisation
 
 #initialise all-state for either phase0 (if it exists) or phase1.  Need to initialise both state and store-all
 hasPhase0 = mi.phases.keys().__contains__("phase0")
@@ -1463,19 +1466,33 @@ for (phName, ph) in mi.phases.items():
                 comma = ","
 off.write("}\n")
 
-#create an all-state explicitly
-off.write("\nlet init_as={\n")
+#create an all-state explicitly, this also involves explictly creating records for past values
+off.write("\nlet init_as:state_"+mi.name+"_all={\n")
 off.write("p = pol,"+nl)
 off.write("der = der,"+nl)
 off.write("state__1 = init_state,"+nl)
+for i in range(2, maxStored + 1):#past values records
+    off.write("state__" + str(i) + "={")
+    comma=""
+    for (phName, ph) in mi.phases.items():
+        for ci in ph.values():
+            if ci.stores >=i:
+                for fld in ci.fieldsCalcd:
+                    if not ci.isArrayed:
+                        off.write(comma+fld+"=0\n")
+                    else:
+                        off.write(comma+fld+"=zeros"+("i" if ci.type=="int" else "")+str(ci.numDims)+" "+"".join([str(i)+" " for i in ci.dimSizes])+nl)
+                    comma = ","
+    off.write("},\n")
 off.write("t = firstProjectionPeriod,"+nl)
 off.write("i_t = 0,"+nl)
-off.write("basisNum = 0")
+off.write("basisNum = 0,"+nl)
+off.write("forceTheIssue=0")
 off.write("}\n")
 off.write(nl)
 
-off.write("let init_as_pre_"+initPhase+" = init_" + mi.name + "_"+initPhase+"_all init_as"+(" scen " if hasESG else "")+" 0 storeAll \n")
-off.write("let storeAll_pre_"+initPhase+" = init_" + mi.name + "_"+initPhase+"_storeAll  0 init_as "+ (" scen " if hasESG else "")+" storeAll \n")
+off.write("let (init_as_pre_"+initPhase+",storeAll') = init_" + mi.name + "_"+initPhase+"_all init_as"+(" scen " if hasESG else "")+" 0 storeAll \n")
+off.write("let storeAll_pre_"+initPhase+" = init_" + mi.name + "_"+initPhase+"_storeAll  0 init_as "+ (" scen " if hasESG else "")+" storeAll' \n")
 
 #run phase 0, should it exist,  TODO; term is fixed: it runs to firstprojectionperiod
 if hasPhase0:
@@ -1534,13 +1551,13 @@ for (phName, ph) in mi.phases.items():
             if mi.phaseStart[phName]!="previousTime":
                 strt=mi.phaseStart[phName]
             else:
-                strt="storeAllPostPhase"+str(phC-2)+".t"
+                strt="as_pre_phase"+str(phC-1)+".t"
             if mi.dataFieldInfos[mi.termField].expression == "":
                 termBit = " (pol." + mi.termField + "-" + strt + ") "
             else:
                 termBit = " (der." + mi.termField + "-" + strt + ") "
-            off.write("let as_pre_phase"+str(phC-1)+"=init_"+mi.name+"_"+phName+"_all as_post_phase"+str(phC-2)+(" scen " if hasESG else "")+" 0 storeAllPostPhase"+str(phC-2)+nl)#initialisation from previous phase (all-state and store-all).
-            off.write("let (as_post_phase"+str(phC-1)+",storeAllPostPhase"+str(phC-1)+")=runNPeriods_" + mi.name +"_"+phName+termBit+" as_pre_phase"+str(phC-1)+" storeAllPostPhase"+str(phC-2) + nl)#run phase
+            off.write("let (as_pre_phase"+str(phC-1)+",storeAllPostPhase"+str(phC-2)+"')=init_"+mi.name+"_"+phName+"_all as_post_phase"+str(phC-2)+(" scen " if hasESG else "")+" 0 storeAllPostPhase"+str(phC-2)+nl)#initialisation from previous phase (all-state and store-all).
+            off.write("let (as_post_phase"+str(phC-1)+",storeAllPostPhase"+str(phC-1)+")=runNPeriods_" + mi.name +"_"+phName+termBit+" as_pre_phase"+str(phC-1)+" storeAllPostPhase"+str(phC-2)+"'" + nl)#run phase
 
 #output from run one pol
 off.write(nl)
@@ -1561,11 +1578,223 @@ off.write("in "+results+nl)
 
 #batches of policies
 off.write("\nlet batchSize:i32="+str(mi.batchSizeInternal)+nl)
-off.write("let numBatches=if np%%batchSize==0 then (np//batchSize) else (np//batchSize+1)\n")
+off.write("let numBatches=if numPols%%batchSize==0 then (numPols//batchSize) else (numPols//batchSize+1)\n")
 off.write("let sumOfBatches=\n")
 off.write("\tloop sumOfBatches':[][][]f32=(zeros3 batchSize "+str(numOutputs)+" numPeriods) for i<numBatches do\n")
 off.write("\tlet lo=i*batchSize\n")
-off.write("\tlet hi=mini (i+1)*batchSize np\n")
-off.write("\tlet batchRes = map2 runOnePol_"+mName+" fileData_"+mName+"[lo:hi] derived_"+mName+"[lo:hi]\n")
+off.write("\tlet hi=mini ((i+1i32)*batchSize) numPols\n")
+off.write("\tlet batchRes = map2 (runOnePol_"+mName+(" scens[0])" if hasESG else ")")+" fileData_"+mName+"[lo:hi] derived_"+mName+"[lo:hi]\n")
 off.write("\tin sumOfBatches' +...+ batchRes\n")
 off.write("in reduce (+..+) (zeros2 "+str(numOutputs)+" numPeriods) sumOfBatches\n")
+
+#call Futhark .c file
+ofc=open(exeSubDir+"/"+"call_futhark.c",'w')
+
+#includes: standard
+ofc.write("#include <stdio.h>"+nl)
+ofc.write("#include <stdlib.h>"+nl)
+ofc.write("#include <stdbool.h>"+nl)
+ofc.write("#include <string.h>"+nl)
+ofc.write("#include <time.h>"+nl)
+
+#includes: futhark and reading routines
+ofc.write("#include \"futhark.h\""+nl)
+ofc.write("#include \"reading.h\""+nl)
+
+#main and command line arguments
+ofc.write("\nint main(int argc, char *argv[])"+nl)
+ofc.write("{"+nl)
+
+#get context and config
+ofc.write(nl)
+ofc.write("struct futhark_context_config * cfg = futhark_context_config_new();"+nl);
+ofc.write("struct futhark_context * ctx = futhark_context_new(cfg);"+nl)
+
+#declare c table arrays
+ofc.write("\nfloat ")
+comma=""
+for mi in modelInfos.values():
+    for (k,t) in mi.tableInfos.items():
+        ofc.write(comma+"*table_"+mi.name+"_"+k)
+        comma=","
+ofc.write(";"+nl)
+
+#declare c data arrays (int)
+ofc.write("\nint ")
+comma=""
+for mi in modelInfos.values():
+    if mi.hasData:
+        ofc.write(comma+"*fileDataInt_"+mi.name)
+        comma=","
+ofc.write(";"+nl)
+ofc.write("\nfloat ")
+#now float
+comma = ""
+for mi in modelInfos.values():
+    if mi.hasData:
+        ofc.write(comma + "*fileDataReal_" + mi.name)
+        comma = ","
+ofc.write(";" + nl)
+
+#declare c ESG arrays
+if hasESG:
+    ofc.write("float *scens;"+nl)
+    ofc.write("int numScenPeriods;"+nl)#do not know this in advance
+
+#read scenarios
+if hasESG:
+    ofc.write("int err;\n")
+    schLineLength=0
+    for fldSize in mi.esg.values():#get scenario line length
+        fldLength=1
+        for fs in fldSize:
+            fldLength*=fs
+        schLineLength+=fs
+    ofc.write("err=readESG(\""+tablesSubDir+"/"+scensFile+",\"\","+str(numScens)+","+str(schLineLength)+",&numScenPeriods,&scens);\n")
+
+#read tables and get size information, this amalgamates all bases into one big table
+basisToNum={"SINGLE":1,"PREFIX":2,"SUFFIX":3,"SUBDIR":4}
+ofc.write("const char *basisNames["+str(len(bases))+"]={")
+comma=""
+for basis in bases:
+    ofc.write(comma+"\""+basis+"\"")
+    comma=","
+ofc.write("};\n")
+for mi in modelInfos.values():
+    for (k,t) in mi.tableInfos.items():
+        comma=""
+        ofc.write("int dimSizes_"+mi.name+"_"+k+"["+str(len(t.dims))+"]={")
+        for e in t.dims:
+            if e=="int":
+                ofc.write(comma+"-1")
+            else:
+                ofc.write(comma+str(enums[e].__len__()))
+            comma=","
+        ofc.write("};\n")
+        ofc.write("err=readTable(\""+tablesSubDir+"/"+k+"\",\"\","+str(len(t.dims))+",dimSizes_"+mi.name+"_"+k+","+str(numBases)+",basisNames,"+str(basisToNum[t.basis])+","+"&table_"+mi.name+"_"+k+");"+nl)
+
+#create futhark table arrays
+tables=[]
+for mi in modelInfos.values():
+    for (k,t) in mi.tableInfos.items():
+        ofc.write("struct futhark_f32_"+str(1+len(t.dims))+"d *fut_"+"table_"+mi.name+"_"+k+"=futhark_new_f32_"+str(1+len(t.dims))+"d(ctx,"+"table_"+mi.name+"_"+k+","+str(numBases)+",")
+        tables=tables.__add__(["fut_"+"table_"+mi.name+"_"+k])
+        comma=""
+        dimCount=0
+        for e in t.dims:
+            if e == "int":
+                ofc.write(comma + "dimSizes_"+mi.name+"_"+k+"["+str(dimCount)+"]")
+            else:
+                ofc.write(comma + str(enums[e].__len__()))
+            comma = ","
+            dimCount+=1
+        ofc.write(");\n")
+
+#read data and create futhark data arrays
+ofc.write("int numPols;\n")
+dataFiles=[]
+for mi in modelInfos.values():
+    if mi.hasData:
+        numDF=0
+        numDFInt=0
+        numDFReal=0
+        for df in mi.dataFieldInfos.values():
+            if df.expression=="":
+                numDF+=1
+                if df.type != "real":
+                    numDFInt+=1
+                else:
+                    numDFReal+=1
+        ofc.write("int intOrReal_"+mi.name+"["+str(numDF)+"]={")
+        comma=""
+        for df in mi.dataFieldInfos.values():
+            if df.expression=="":
+                ofc.write(comma+("1" if df.type=="real" else "0"))
+                comma=","
+        ofc.write("};\n")
+        ofc.write("int arraySize_"+mi.name+"["+str(numDF)+"]={")
+        comma=""
+        for df in mi.dataFieldInfos.values():
+            if df.expression=="":
+                ofc.write(comma+("1" if df.arraySize==0 else str(df.arraySize)))
+                comma=","
+        ofc.write("};\n")
+        ofc.write("err=readData(\""+dataSubDir+"/data_"+mi.name+"\",\"\","+str(numDF)+",intOrReal_"+mi.name+",arraySize_"+mi.name+",&numPols,&fileDataReal_"+mi.name+",&fileDataInt_"+mi.name+");\n")
+        dataFiles=dataFiles.__add__(["fileDataInt_"+mi.name])
+        dataFiles=dataFiles.__add__(["fileDataReal_"+mi.name])
+        ofc.write("struct futhark_i32_2d *fut_fileDataInt_"+mi.name+"=futhark_new_i32_2d(ctx,fileDataInt_"+mi.name+",numPols,"+str(numDFInt)+");"+nl)
+        ofc.write("struct futhark_f32_2d *fut_fileDataReal_" + mi.name + "=futhark_new_f32_2d(ctx,fileDataReal_" + mi.name + ",numPols," + str(numDFReal) + ");" + nl)
+
+#declare futhark ESG arrays
+if hasESG:
+    ofc.write("struct futhark_f32_3d *fut_scens=futhark_new_f32_3d(ctx,scens,"+str(numScens)+",numScenPeriods,"+str(schLineLength)+");" + nl)
+
+#create the futhark results arrays
+numOutputs=0
+for mi in modelInfos.values():
+    numPeriods=mi.lastProjectionPeriod-mi.firstProjectionPeriod+1
+    for ph in mi.phases.values():
+        for ci in ph.values():
+            if ci.outputMe:
+                numOutputs+=1
+ofc.write("struct futhark_f32_2d *fut_Res;\n")
+ofc.write("float *res=(float*) malloc("+str(numOutputs)+"*"+str(numPeriods)+"*sizeof(float));\n")
+
+#call futhark (incl.timing)
+ofc.write("struct timespec startTime,endTime;\n")
+ofc.write("clock_gettime(CLOCK_PROCESS_CPUTIME_ID,&startTime);\n")
+
+ofc.write("int futErr=futhark_entry_main(ctx,&fut_Res,"+str(numPeriods)+",")
+for dfl in dataFiles:
+    ofc.write("fut_"+dfl+",")
+comma=""
+for tbl in tables:
+    ofc.write(comma+tbl)
+    comma=","
+ofc.write(");\n")
+
+ofc.write("clock_gettime(CLOCK_PROCESS_CPUTIME_ID,&endTime);\n")
+ofc.write("double diffTime=(endTime.tv_sec-startTime.tv_sec)+(endTime.tv_nsec-startTime.tv_nsec)/1e9;\n")
+
+#get results from futhark
+ofc.write("futhark_values_f32_2d(ctx,fut_Res,res);\n")
+
+#free c table arrays
+for tbl in tables:
+    ofc.write("free ("+tbl[4:]+");"+nl)
+
+#free futhark table arrays
+for mi in modelInfos.values():
+    for (k,t) in mi.tableInfos.items():
+        ofc.write("futhark_free_f32_"+str(1+len(t.dims))+"d(ctx,fut_table_"+mi.name+"_"+k+");\n")
+
+#free c data arrays
+for df in dataFiles:
+    ofc.write("free ("+df+");"+nl)
+
+#free futhark data arrays
+intIsh=0
+for df in dataFiles:
+    if intIsh==0:
+        ofc.write("futhark_free_i32_2d(ctx,fut_"+df+ ");\n")
+    else:
+        ofc.write("futhark_free_f32_2d(ctx,fut_"+df+ ");\n")
+    intIsh=1-intIsh;
+
+#free c ESG arrays
+if hasESG:
+    ofc.write("delete[]scens;")
+
+#free futhark ESG arrays
+if hasESG:
+    ofc.write("futhark_free_f32_3d(ctx,fut_scens);"+nl)
+
+#free context
+ofc.write("futhark_context_free(ctx);\n")
+ofc.write("futhark_context_config_free(cfg);\n")
+
+#output results to file
+
+ofc.write("\nreturn 0;\n")
+ofc.write("}"+nl)
+ofc.close()

@@ -1,8 +1,9 @@
 [basic]
 mode=independent
-stochastic=false//if true, need an ESG
+stochastic=true//if true, need an ESG
 numScenarios=0//if stochastic
-numInnerScenarios=1000//for nested
+numInnerScenarios=0//for nested
+file=dummyscenarios
 [end]
 [subbase]
 name=disc
