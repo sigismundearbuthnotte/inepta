@@ -12,7 +12,8 @@ using namespace std;
 extern "C" int readTable(const char* fileName,const char* baseSubdir, int numDims,int*dimSizes,int numBases,const char* bases[],int basisType,float **table,int*lb);
 extern "C" int readData(const char*fileName,const char* subdir,int numFields,int *intOrReal, int*arraySize,int *numPols,float **dataReal,int **dataInt);
 extern "C" int readESG(const char*fileName,const char* subdir,int numScens,int numFields,int*numPeriods,float**scens);
-
+extern "C" void freeReals(float *p);
+extern "C" void freeInts(int *p);
 
 const int basisSingle=1;
 const int basisPrefix=2;
@@ -247,4 +248,14 @@ int readESG(const char*fileName,const char* subdir,int numScens,int numFields,in
     }
     inFile.close();
     return 0;
+}
+
+void freeReals(float *p)
+{
+    delete[]p;
+}
+
+void freeInts(int *p)
+{
+    delete[]p;
 }

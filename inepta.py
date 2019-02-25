@@ -1,11 +1,19 @@
 import os
 import sys
 import re
+import subprocess
 
 #errors
 def doErr(errStr,infoStr):
     print(errStr+" "+ infoStr, file=sys.stderr)
     sys.exit()
+
+#control
+compileFuthark=False
+compileC=False
+compileExe=False
+futharkPath="/home/andrew/futhark-0.9.1-linux-x86_64/bin"
+targetLanguage="c"#"opencl"
 
 #constants
 nl="\n"
@@ -21,7 +29,7 @@ allowableSections=set(["BASIC","ESG","DATA","DERIVED","PHASE","END","TABLES","CO
 allowableBasicParams=set(["NAME","ARRAYED","TERM","START","FORCE","FIRSTPROJECTIONPERIOD","LASTPROJECTIONPERIOD","BATCHSIZEEXTERNAL","BATCHSIZEINTERNAL"])
 calcSettings={"STORE":True,"TYPE":True,"__NR1":False,"__NR2":False,"__R1":False,"__R2":False,"OUTPUT":False,"OVERWRITES":True}#does a further value follow the setting name?
 allowablecalcSettings=set(calcSettings.keys())
-allowablePhaseSettings=set(["NAME","DIRECTION","START"])
+allowablePhaseSettings=set(["NAME","DIRECTION","START","TERM"])
 allowableDirections=set(["FORWARDS","BACKWARDS","STATIC"])
 allowableTableBases=set(["SINGLE","PREFIX","SUFFIX","SUBDIR"])
 allowableTopSections=set(["BASIC","BASES","SUBBASE","REBASING","MODELS","END"])
@@ -60,6 +68,7 @@ class modelInfo(object):#persistent data for a model
         self.phases={}#indexed by name, returns dict of calcInfoObjects
         self.phaseDirections={"phase0":"backwards","phase1":"forwards"}
         self.phaseStart={}#name->int/firstprojectionperiod/ previous
+        self.phaseTerm={}#Does not apply to phases 0 or 1.  name->expression
         self.tableInfos={}
         self.hasData=False
         self.hasDerived=False
@@ -206,7 +215,8 @@ def readBasicModelInfo(mfn):
                     skipItem=calcSettings[lsu[i]]#do we skip the next item?
                     if lsu[i]=="OUTPUT":
                         ci.isOutput = True
-                        ci.stores=-1
+                        if outputMode=="VECTOR":
+                            ci.stores=-1
                     if lsu[i]=="STORE":
                         if ls[i+1].isnumeric():
                             ci.stores = int(ls[i + 1])
@@ -332,6 +342,9 @@ def readBasicModelInfo(mfn):
                     if lsu[i] == "START":
                         mi.phaseStart[currPhaseName] = ls[i + 1]
                         skipItem = True
+                    if lsu[i] == "TERM":
+                        mi.phaseTerm[currPhaseName] = ls[i + 1]
+                        skipItem = True
             if section =="CALC":
                 l=l.strip()
                 if l[0:4].upper()=="CALL":
@@ -423,6 +436,7 @@ numScens=0
 numInnerScens=0
 firstRebasedBasis=0
 scensFile=""
+outputMode="VECTOR"
 for l in ift.readlines():
     (ls,c,lsu)=nwscap(l,",=")
     if c:
@@ -435,7 +449,7 @@ for l in ift.readlines():
                 doErr("Unterminated section preceding ", ls[0])
             continue
         if section=="BASIC":
-            if lsu[0] not in set(["MODE","STOCHASTIC","NUMSCENARIOS","NUMINNERSCENARIOS","FILE"]):
+            if lsu[0] not in set(["MODE","STOCHASTIC","NUMSCENARIOS","NUMINNERSCENARIOS","FILE","OUTPUT"]):
                 doErr("Unknown basic setting for top level model file: ",l)
             if lsu[0]=="MODE":
                 if lsu[1] not in set(["DEPENDENT","INDEPENDENT"]):
@@ -448,7 +462,9 @@ for l in ift.readlines():
             if lsu[0] == "NUMINNERSCENARIOS":
                 numInnerScens = int(lsu[1])
             if lsu[0] == "FILE":
-                scensFile = lsu[1]
+                scensFile = ls[1]
+            if lsu[0]=="OUTPUT":
+                outputMode=lsu[1]
         if section=="SUBBASE":
             if lsu[0]=="NAME":
                 sbVals[ls[1]]=[]
@@ -1005,7 +1021,7 @@ for mi in modelInfos.values():
     comma = ""
     for ph in mi.phases.values():
         for ci in ph.values():
-            if ci.stores > 0:
+            if ci.stores > 0 or (ci.isOutput and outputMode=="SCALAR"):
                 typ = "int"
                 if ci.type == "real":
                     typ = "real"
@@ -1140,7 +1156,7 @@ for mi in modelInfos.values():#data files
 for mi in modelInfos.values():#tables and their lower bounds (for (possibly) inner 2 dimensions)
     for t in mi.tableInfos.values():
         off.write(" (table_"+t.name+"_"+mi.name+":"+("[numBases]" if t.basis!="SINGLE" else "")+multiBracket[len(t.dims)]+"f32)"+(" (lb_"+t.name+"_"+mi.name+":[]i32)" if t.dim1HasLB or t.dim2HasLB else ""))
-off.write(":[][]f32="+nl)
+off.write(":"+("[]" if outputMode=="VECTOR" else "")+"[]f32="+nl)
 
 off.write("\nunsafe\n\n")
 
@@ -1323,7 +1339,7 @@ for mi in modelInfos.values():
             for i in range(mi.maxStored ,0,-1):#stored states
                 off.write("let state__"+str(i)+"=as.state__"+str(i))
                 for ci in ph.values():
-                    if ci.stores >= i:
+                    if ci.stores >= i or (i==1 and ci.isOutput and outputMode=="SCALAR"):
                         for fld in ci.fieldsCalcd:
                             off.write(" with "+fld+"="+("as.state__"+str(i-1)+"." if i>1 else "")+fld)
                 off.write(nl)
@@ -1440,7 +1456,7 @@ if mi.hasData:
     off.write("(pol:data_" + mi.name + ") ")
 if mi.hasDerived:
     off.write("(der:derived_" + mi.name + ")")
-off.write(":[][]f32 =" + nl)
+off.write(":"+("[]" if outputMode=="VECTOR" else "")+"[]f32 =" + nl)
 
 #Define the store-all array
 off.write("let storeAll:*[][]f32=copy (undef2 numSAs (numPeriods+1))\n")#one extra period for initialisation
@@ -1457,7 +1473,7 @@ off.write("\nlet init_state:state_"+mi.name+"={"+nl)
 comma=""
 for (phName, ph) in mi.phases.items():
     for ci in ph.values():
-        if ci.stores > 0:
+        if ci.stores > 0 or (ci.isOutput and outputMode=="SCALAR"):
             for fld in ci.fieldsCalcd:
                 if not ci.isArrayed:
                     off.write(comma+fld+"=0\n")
@@ -1552,12 +1568,14 @@ for (phName, ph) in mi.phases.items():
                 strt=mi.phaseStart[phName]
             else:
                 strt="as_pre_phase"+str(phC-1)+".t"
-            if mi.dataFieldInfos[mi.termField].expression == "":
-                termBit = " (pol." + mi.termField + "-" + strt + ") "
-            else:
-                termBit = " (der." + mi.termField + "-" + strt + ") "
+            dummyCi=calcInfoObject()
+            dummyCi.name = ""
+            dummyCi.lhs = "phTerm="
+            dummyCi.initialisation = mi.phaseTerm[phName]
+            dummyCi.myPhase=phName
+            convCode(mi, dummyCi, DERIVED)
             off.write("let (as_pre_phase"+str(phC-1)+",storeAllPostPhase"+str(phC-2)+"')=init_"+mi.name+"_"+phName+"_all as_post_phase"+str(phC-2)+(" scen " if hasESG else "")+" 0 storeAllPostPhase"+str(phC-2)+nl)#initialisation from previous phase (all-state and store-all).
-            off.write("let (as_post_phase"+str(phC-1)+",storeAllPostPhase"+str(phC-1)+")=runNPeriods_" + mi.name +"_"+phName+termBit+" as_pre_phase"+str(phC-1)+" storeAllPostPhase"+str(phC-2)+"'" + nl)#run phase
+            off.write("let (as_post_phase"+str(phC-1)+",storeAllPostPhase"+str(phC-1)+")=runNPeriods_" + mi.name +"_"+phName+" phTerm as_pre_phase"+str(phC-1)+" storeAllPostPhase"+str(phC-2)+"'" + nl)#run phase
 
 #output from run one pol
 off.write(nl)
@@ -1566,13 +1584,24 @@ for (phName, ph) in mi.phases.items():#get output calcs and assemble their 1-d (
     comma=""
     for ci in ph.values():
         if ci.isOutput:
-            if not ci.isArrayed:
-                results+=comma+"storeAllPostPhase"+str(phC-1)+"[i_"+mi.name+"_"+ci.name+"]"
-                comma = ","
-            else:
-                for i in range(0,ci.dimSizes[0]):
-                    results += comma + "storeAllPostPhase" + str(phC - 1) + "[i_" + mi.name + "_"+ci.name +"+"+ str(i)+"]"
+            if outputMode=="VECTOR":
+                if not ci.isArrayed:
+                    results+=comma+"storeAllPostPhase"+str(phC-1)+"[i_"+mi.name+"_"+ci.name+"]"
                     comma = ","
+                else:
+                    for i in range(0,ci.dimSizes[0]):
+                        results += comma + "storeAllPostPhase" + str(phC - 1) + "[i_" + mi.name + "_"+ci.name +"+"+ str(i)+"]"
+                        comma = ","
+            else:
+                if not ci.isArrayed:
+                    for fld in ci.fieldsCalcd:
+                        results+=comma+"as_post_phase"+str(phC-1)+".state__1."+fld
+                        comma = ","
+                else:
+                    for i in range(0,ci.dimSizes[0]):
+                        results += comma + "as_post_phase" + str(phC - 1) + ".state__1."+ci.name+"["+str(i)+"]"
+                        comma = ","
+
 results+="]"
 off.write("in "+results+nl)
 
@@ -1580,12 +1609,13 @@ off.write("in "+results+nl)
 off.write("\nlet batchSize:i32="+str(mi.batchSizeInternal)+nl)
 off.write("let numBatches=if numPols%%batchSize==0 then (numPols//batchSize) else (numPols//batchSize+1)\n")
 off.write("let sumOfBatches=\n")
-off.write("\tloop sumOfBatches':[][][]f32=(zeros3 batchSize "+str(numOutputs)+" numPeriods) for i<numBatches do\n")
+off.write("\tloop sumOfBatches':"+("[]" if outputMode=="VECTOR" else "")+"[][]f32=(zeros"+("3" if outputMode=="VECTOR" else "2")+" batchSize "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" for i<numBatches do\n")
 off.write("\tlet lo=i*batchSize\n")
 off.write("\tlet hi=mini ((i+1i32)*batchSize) numPols\n")
 off.write("\tlet batchRes = map2 (runOnePol_"+mName+(" scens[0])" if hasESG else ")")+" fileData_"+mName+"[lo:hi] derived_"+mName+"[lo:hi]\n")
-off.write("\tin sumOfBatches' +...+ batchRes\n")
-off.write("in reduce (+..+) (zeros2 "+str(numOutputs)+" numPeriods) sumOfBatches\n")
+off.write("\tin sumOfBatches' +."+("." if outputMode=="VECTOR" else "")+".+ batchRes\n")
+off.write("in reduce (+."+("." if outputMode=="VECTOR" else "")+"+) (zeros"+("2" if outputMode=="VECTOR" else "1")+" "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" sumOfBatches\n")
+off.close()
 
 #call Futhark .c file
 ofc=open(exeSubDir+"/"+"call_futhark.c",'w')
@@ -1615,7 +1645,7 @@ ofc.write("\nfloat ")
 comma=""
 for mi in modelInfos.values():
     for (k,t) in mi.tableInfos.items():
-        ofc.write(comma+"*table_"+mi.name+"_"+k)
+        ofc.write(comma+"*table_"+k+"_"+mi.name)
         comma=","
 ofc.write(";"+nl)
 
@@ -1649,8 +1679,8 @@ if hasESG:
         fldLength=1
         for fs in fldSize:
             fldLength*=fs
-        schLineLength+=fs
-    ofc.write("err=readESG(\""+tablesSubDir+"/"+scensFile+",\"\","+str(numScens)+","+str(schLineLength)+",&numScenPeriods,&scens);\n")
+        schLineLength+=fldLength
+    ofc.write("err=readESG(\""+scensSubDir+"/"+scensFile+"\",\"\","+str(numScens)+","+str(schLineLength)+",&numScenPeriods,&scens);\n")
 
 #read tables and get size information, this amalgamates all bases into one big table
 basisToNum={"SINGLE":1,"PREFIX":2,"SUFFIX":3,"SUBDIR":4}
@@ -1663,32 +1693,42 @@ ofc.write("};\n")
 for mi in modelInfos.values():
     for (k,t) in mi.tableInfos.items():
         comma=""
-        ofc.write("int dimSizes_"+mi.name+"_"+k+"["+str(len(t.dims))+"]={")
+        ofc.write("int lb_"+k+"_"+mi.name+"[2];"+nl)#declare c arrays to hold table lower bounds
+        ofc.write("int dimSizes_"+k+"_"+mi.name+"["+str(len(t.dims))+"]={")
         for e in t.dims:
-            if e=="int":
+            if e[0]=="(":
+                e=e[1:]
+            if e[-1]==")":
+                e=e[:-1]
+            if e=="int" or e=="int0":
                 ofc.write(comma+"-1")
             else:
                 ofc.write(comma+str(enums[e].__len__()))
             comma=","
         ofc.write("};\n")
-        ofc.write("err=readTable(\""+tablesSubDir+"/"+k+"\",\"\","+str(len(t.dims))+",dimSizes_"+mi.name+"_"+k+","+str(numBases)+",basisNames,"+str(basisToNum[t.basis])+","+"&table_"+mi.name+"_"+k+");"+nl)
+        ofc.write("err=readTable(\""+tablesSubDir+"/"+k+"\",\"\","+str(len(t.dims))+",dimSizes_"+k+"_"+mi.name+","+str(numBases)+",basisNames,"+str(basisToNum[t.basis])+","+"&table_"+k+"_"+mi.name+",lb_"+k+"_"+mi.name+");"+nl)
 
 #create futhark table arrays
 tables=[]
 for mi in modelInfos.values():
     for (k,t) in mi.tableInfos.items():
-        ofc.write("struct futhark_f32_"+str(1+len(t.dims))+"d *fut_"+"table_"+mi.name+"_"+k+"=futhark_new_f32_"+str(1+len(t.dims))+"d(ctx,"+"table_"+mi.name+"_"+k+","+str(numBases)+",")
-        tables=tables.__add__(["fut_"+"table_"+mi.name+"_"+k])
+        ofc.write("struct futhark_f32_"+str((1 if t.basis!="SINGLE" else 0)+len(t.dims))+"d *fut_"+"table_"+k+"_"+mi.name+"=futhark_new_f32_"+str((1 if t.basis!="SINGLE" else 0)+len(t.dims))+"d(ctx,"+"table_"+k+"_"+mi.name+(","+str(numBases)if t.basis!="SINGLE" else "")+",")
+        tables=tables.__add__(["fut_"+"table_"+k+"_"+mi.name])
         comma=""
         dimCount=0
         for e in t.dims:
-            if e == "int":
-                ofc.write(comma + "dimSizes_"+mi.name+"_"+k+"["+str(dimCount)+"]")
+            if e[0]=="(":
+                e=e[1:]
+            if e[-1]==")":
+                e=e[:-1]
+            if e == "int" or e=="int0":
+                ofc.write(comma + "dimSizes_"+k+"_"+mi.name+"["+str(dimCount)+"]")
             else:
                 ofc.write(comma + str(enums[e].__len__()))
             comma = ","
             dimCount+=1
         ofc.write(");\n")
+        ofc.write("struct futhark_i32_1d *fut_"+"lb_"+k+"_"+mi.name+"=futhark_new_i32_1d(ctx,"+"lb_"+k+"_"+mi.name+",2);"+nl)
 
 #read data and create futhark data arrays
 ofc.write("int numPols;\n")
@@ -1702,9 +1742,9 @@ for mi in modelInfos.values():
             if df.expression=="":
                 numDF+=1
                 if df.type != "real":
-                    numDFInt+=1
+                    numDFInt+=max(df.arraySize,1)
                 else:
-                    numDFReal+=1
+                    numDFReal+=max(df.arraySize,1)
         ofc.write("int intOrReal_"+mi.name+"["+str(numDF)+"]={")
         comma=""
         for df in mi.dataFieldInfos.values():
@@ -1735,42 +1775,49 @@ for mi in modelInfos.values():
     numPeriods=mi.lastProjectionPeriod-mi.firstProjectionPeriod+1
     for ph in mi.phases.values():
         for ci in ph.values():
-            if ci.outputMe:
-                numOutputs+=1
-ofc.write("struct futhark_f32_2d *fut_Res;\n")
-ofc.write("float *res=(float*) malloc("+str(numOutputs)+"*"+str(numPeriods)+"*sizeof(float));\n")
+            if ci.isOutput:
+                numOutputs+=(1 if ci.dimSizes==[] else ci.dimSizes[0])
+ofc.write("struct futhark_f32_"+("2" if outputMode=="VECTOR" else "1")+"d *fut_Res;\n")
+ofc.write("float *res=(float*) malloc("+str(numOutputs)+("*"+str(numPeriods)if outputMode=="VECTOR" else "")+"*sizeof(float));\n")
 
 #call futhark (incl.timing)
 ofc.write("struct timespec startTime,endTime;\n")
 ofc.write("clock_gettime(CLOCK_PROCESS_CPUTIME_ID,&startTime);\n")
 
-ofc.write("int futErr=futhark_entry_main(ctx,&fut_Res,"+str(numPeriods)+",")
+ofc.write("int futErr=futhark_entry_main(ctx,&fut_Res,"+(" fut_scens " if hasESG else "")+",")
 for dfl in dataFiles:
     ofc.write("fut_"+dfl+",")
 comma=""
-for tbl in tables:
-    ofc.write(comma+tbl)
+for (kt,t) in mi.tableInfos.items():
+    ofc.write(comma+"fut_table_"+kt+"_"+mi.name)
     comma=","
+    if t.dim1HasLB or  t.dim2HasLB:
+        ofc.write(comma+"fut_lb_"+kt+"_"+mi.name)
 ofc.write(");\n")
 
 ofc.write("clock_gettime(CLOCK_PROCESS_CPUTIME_ID,&endTime);\n")
 ofc.write("double diffTime=(endTime.tv_sec-startTime.tv_sec)+(endTime.tv_nsec-startTime.tv_nsec)/1e9;\n")
 
 #get results from futhark
-ofc.write("futhark_values_f32_2d(ctx,fut_Res,res);\n")
+ofc.write("futhark_values_f32_"+("2" if outputMode=="VECTOR" else "1")+"d(ctx,fut_Res,res);\n")
 
 #free c table arrays
 for tbl in tables:
-    ofc.write("free ("+tbl[4:]+");"+nl)
+    ofc.write("freeReals ("+tbl[4:]+");"+nl)
 
 #free futhark table arrays
 for mi in modelInfos.values():
     for (k,t) in mi.tableInfos.items():
-        ofc.write("futhark_free_f32_"+str(1+len(t.dims))+"d(ctx,fut_table_"+mi.name+"_"+k+");\n")
+        ofc.write("futhark_free_f32_"+str((1 if t.basis!="SINGLE" else 0)+len(t.dims))+"d(ctx,fut_table_"+k+"_"+mi.name+");\n")
 
 #free c data arrays
+dc=0
 for df in dataFiles:
-    ofc.write("free ("+df+");"+nl)
+    if dc==0:
+        ofc.write("freeInts("+df+");"+nl)
+    else:
+        ofc.write("freeReals(" + df + ");" + nl)
+    dc=1-dc
 
 #free futhark data arrays
 intIsh=0
@@ -1783,7 +1830,7 @@ for df in dataFiles:
 
 #free c ESG arrays
 if hasESG:
-    ofc.write("delete[]scens;")
+    ofc.write("freeReals(scens);\n")
 
 #free futhark ESG arrays
 if hasESG:
@@ -1798,3 +1845,17 @@ ofc.write("futhark_context_config_free(cfg);\n")
 ofc.write("\nreturn 0;\n")
 ofc.write("}"+nl)
 ofc.close()
+
+#Compile Futhark to Futhark library
+if compileFuthark:
+    os.environ["PATH"]+=os.pathsep+futharkPath#goodness only knows why I need to do this...
+    subprocess.run(["futhark "+targetLanguage+" --library futhark.fut"],cwd=exeSubDir,shell=True)#individual arguments do not seem to work...
+
+#Compile latter to C
+if compileC:
+    subprocess.run(["gcc futhark.c -o libfuthark.so -fPIC -shared"],cwd=exeSubDir,shell=True)#individual arguments do not seem to work...
+
+#Compile and link call_futhark, reading libraries, Futhark library => final "exe"
+#TODO needs paths and libraries to opencl etc. - see "commands" file
+if compileExe:
+    pass
