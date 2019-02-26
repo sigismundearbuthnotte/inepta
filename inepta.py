@@ -908,6 +908,7 @@ for mi in modelInfos.values():
                     numOutputs+=1
                 else:
                     numOutputs+=ci.dimSizes[0]
+off.write("let numOutputs:i32="+str(numOutputs)+nl)
 
 if not isDependent:
     mName=list(modelInfos.keys())[0]
@@ -925,7 +926,7 @@ for mi in modelInfos.values():
     off.write("let firstProjectionPeriod:i32=("+str(mi.firstProjectionPeriod)+")"+nl)
     off.write("let lastProjectionPeriod:i32=(" + str(mi.lastProjectionPeriod) + ")" + nl)
     off.write("let numPeriods:i32=lastProjectionPeriod-firstProjectionPeriod+1" + nl)
-    off.write("let numScens:i32="+str(numScens)+nl)
+    off.write("let numScens:f32="+str(numScens)+nl)
     numPeriods=mi.lastProjectionPeriod-mi.firstProjectionPeriod+1
     break
 
@@ -1450,12 +1451,14 @@ for mi in modelInfos.values():#only 1 model
     break
 off.write(nl)
 off.write("\nlet runOnePol_" + mi.name)
-if hasESG:
+if hasESG and not isStochastic:
     off.write(" (scen:oneScen) ")
 if mi.hasData:
     off.write("(pol:data_" + mi.name + ") ")
 if mi.hasDerived:
     off.write("(der:derived_" + mi.name + ")")
+if isStochastic:#different position of scens to allow easy map thereover
+    off.write(" (scen:oneScen) ")
 off.write(":"+("[]" if outputMode=="VECTOR" else "")+"[]f32 =" + nl)
 
 #Define the store-all array
@@ -1605,6 +1608,13 @@ for (phName, ph) in mi.phases.items():#get output calcs and assemble their 1-d (
 results+="]"
 off.write("in "+results+nl)
 
+#run one policy on all scenarios, for stochastic
+if isStochastic:
+    off.write("\nlet runOnePolAllScens_"+mi.name+" (scens:[]oneScen) (pol:data_ia1) (der:derived_ia1):[]f32 ="+nl)
+    off.write("let allSimsResults:[][]f32=map (runOnePol_"+mi.name+" pol der) scens"+nl)
+    off.write("let sumSims = reduce (+.+) (zeros1 numOutputs) allSimsResults"+nl)
+    off.write("in map (/numScens) sumSims\n")
+
 #batches of policies
 off.write("\nlet batchSize:i32="+str(mi.batchSizeInternal)+nl)
 off.write("let numBatches=if numPols%%batchSize==0 then (numPols//batchSize) else (numPols//batchSize+1)\n")
@@ -1612,7 +1622,7 @@ off.write("let sumOfBatches=\n")
 off.write("\tloop sumOfBatches':"+("[]" if outputMode=="VECTOR" else "")+"[][]f32=(zeros"+("3" if outputMode=="VECTOR" else "2")+" batchSize "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" for i<numBatches do\n")
 off.write("\tlet lo=i*batchSize\n")
 off.write("\tlet hi=mini ((i+1i32)*batchSize) numPols\n")
-off.write("\tlet batchRes = map2 (runOnePol_"+mName+(" scens[0])" if hasESG else ")")+" fileData_"+mName+"[lo:hi] derived_"+mName+"[lo:hi]\n")
+off.write("\tlet batchRes = map2 (runOnePol"+("AllScens" if isStochastic else "")+"_"+mName+(" scens"+("[0]"if not isStochastic else "")+")" if hasESG else ")")+" fileData_"+mName+"[lo:hi] derived_"+mName+"[lo:hi]\n")
 off.write("\tin sumOfBatches' +."+("." if outputMode=="VECTOR" else "")+".+ batchRes\n")
 off.write("in reduce (+."+("." if outputMode=="VECTOR" else "")+"+) (zeros"+("2" if outputMode=="VECTOR" else "1")+" "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" sumOfBatches\n")
 off.close()
