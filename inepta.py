@@ -716,7 +716,16 @@ def convCode(mi,ci,codeType):#print converted code and return the expression to 
         for ind in range(1, ci.numDims + 1):  # array index parameters
             off.write(" (i" + str(ind) + ":i32) ")
         off.write(":"+("i" if ci.type!="real" else "f")+"32=\n")
+    isQuoted=False
     for l in code:  # loop through lines
+        if l[0:3]=="\"\"\"":#quoting/unquoting?
+            isQuoted=not isQuoted
+            l=l[3:]
+            if l=="":
+                continue
+        if isQuoted:#quoted: write verbatim
+            off.write(l)
+            continue
         commPos = l.find("//")  # find and eliminate comments
         if commPos > 0:
             l = l[0:commPos]
@@ -1706,16 +1715,22 @@ if isStochastic:
     off.write("let sumSims = reduce (+.+) (zeros1 numOutputs) allSimsResults"+nl)
     off.write("in map (/numScens) sumSims\n")
 
-#batches of policies
-off.write("\nlet batchSize:i32="+str(mi.batchSizeInternal)+nl)
-off.write("let numBatches=if numPols%%batchSize==0 then (numPols//batchSize) else (numPols//batchSize+1)\n")
-off.write("let sumOfBatches=\n")
-off.write("\tloop sumOfBatches':"+("[]" if outputMode=="VECTOR" else "")+"[][]f32=(zeros"+("3" if outputMode=="VECTOR" else "2")+" batchSize "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" for i<numBatches do\n")
-off.write("\tlet lo=i*batchSize\n")
-off.write("\tlet hi=mini ((i+1i32)*batchSize) numPols\n")
-off.write("\tlet batchRes = map2 (runOnePol"+("AllScens" if isStochastic else "")+"_"+mName+(" scens"+("[0]"if not isStochastic else "")+")" if hasESG else ")")+" fileData_"+mName+"[lo:hi] derived_"+mName+"[lo:hi]\n")
-off.write("\tin sumOfBatches' +."+("." if outputMode=="VECTOR" else "")+".+ batchRes\n")
-off.write("in reduce (+."+("." if outputMode=="VECTOR" else "")+"+) (zeros"+("2" if outputMode=="VECTOR" else "1")+" "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" sumOfBatches\n")
+#batches of policies, if required
+if mi.batchSizeInternal>0:
+    off.write("\nlet batchSize:i32="+str(mi.batchSizeInternal)+nl)
+    off.write("let numBatches=if numPols%%batchSize==0 then (numPols//batchSize) else (numPols//batchSize+1)\n")
+    off.write("let sumOfBatches=\n")
+    off.write("\tloop sumOfBatches':"+("[]" if outputMode=="VECTOR" else "")+"[][]f32=(zeros"+("3" if outputMode=="VECTOR" else "2")+" batchSize "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" for i<numBatches do\n")
+    off.write("\tlet lo=i*batchSize\n")
+    off.write("\tlet hi=mini ((i+1i32)*batchSize) numPols\n")
+    off.write("\tlet batchRes = map2 (runOnePol"+("AllScens" if isStochastic else "")+"_"+mName+(" scens"+("[0]"if not isStochastic else "")+")" if hasESG else ")")+" fileData_"+mName+"[lo:hi] derived_"+mName+"[lo:hi]\n")
+    off.write("\tin sumOfBatches' +."+("." if outputMode=="VECTOR" else "")+".+ batchRes\n")
+    off.write("in reduce (+."+("." if outputMode=="VECTOR" else "")+"+) (zeros"+("2" if outputMode=="VECTOR" else "1")+" "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" sumOfBatches\n")
+else:
+    off.write(nl)
+    off.write("let res = map2 (runOnePol"+("AllScens" if isStochastic else "")+"_"+mName+(" scens"+("[0]"if not isStochastic else "")+")" if hasESG else ")")+" fileData_"+mName+" derived_"+mName+nl)
+    off.write("in reduce (+."+("." if outputMode=="VECTOR" else "")+"+) (zeros"+("2" if outputMode=="VECTOR" else "1")+" "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" res\n")
+
 off.close()
 
 #call Futhark .c file
@@ -1783,6 +1798,15 @@ if hasESG:
         schLineLength+=fldLength
     ofc.write("err=readESG(\""+scensSubDir+"/"+scensFile+"\",\"\","+str(numScens)+","+str(schLineLength)+",&numScenPeriods,&scens);\n")
 
+def printTableBlocks(t,level,stringSoFar):#recursively build up string an then print e.g. male+sch1; will only do blocks i.e. all except last 2 dims
+    if level==len(t.dims)-2 or t.dims[level]=="int" or t.dims[level]=="int0":
+        if stringSoFar!="":
+            ofc.write(",\""+stringSoFar+"+\"")
+    else:
+        e=enums[t.dims[level].replace("(","").replace(")","").strip()]
+        for k in e.keys():
+            printTableBlocks(t,level+1,stringSoFar+"+"+k)
+
 #read tables and get size information, this amalgamates all bases into one big table
 basisToNum={"SINGLE":1,"PREFIX":2,"SUFFIX":3,"SUBDIR":4}
 ofc.write("const char *basisNames["+str(len(bases))+"]={")
@@ -1807,7 +1831,10 @@ for mi in modelInfos.values():
                 ofc.write(comma+str(enums[e].__len__()))
             comma=","
         ofc.write("};\n")
-        ofc.write("err=readTable(\""+tablesSubDir+"/"+k+"\",\"\","+str(len(t.dims))+",dimSizes_"+k+"_"+mi.name+","+str(numBases)+",basisNames,"+str(basisToNum[t.basis])+","+"&table_"+k+"_"+mi.name+",lb_"+k+"_"+mi.name+");"+nl)
+        ofc.write("const char *blockOrder_"+k+"_"+mi.name+"[]={\"\"")#arrays of strings labelling in blocks in the order given by the enums - will be used by c++ to read blocks in the correct order
+        printTableBlocks(t,0,"")
+        ofc.write("};\n")
+        ofc.write("err=readTable(\""+tablesSubDir+"/"+k+"\",\"\","+str(len(t.dims))+",dimSizes_"+k+"_"+mi.name+","+str(numBases)+",basisNames,"+str(basisToNum[t.basis])+","+"&table_"+k+"_"+mi.name+",lb_"+k+"_"+mi.name+",blockOrder_"+k+"_"+mi.name+");"+nl)
 
 #create futhark table arrays
 tables=[]

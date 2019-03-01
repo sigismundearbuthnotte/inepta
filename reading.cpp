@@ -9,7 +9,7 @@
 
 using namespace std;
 
-extern "C" int readTable(const char* fileName,const char* baseSubdir, int numDims,int*dimSizes,int numBases,const char* bases[],int basisType,float **table,int*lb);
+/*extern "C"*/ int readTable(const char* fileName,const char* baseSubdir, int numDims,int*dimSizes,int numBases,const char* bases[],int basisType,float **table,int*lb,const char *bo[]);
 extern "C" int readData(const char*fileName,const char* subdir,int numFields,int *intOrReal, int*arraySize,int *numPols,float **dataReal,int **dataInt);
 extern "C" int readESG(const char*fileName,const char* subdir,int numScens,int numFields,int*numPeriods,float**scens);
 extern "C" void freeReals(float *p);
@@ -20,7 +20,7 @@ const int basisPrefix=2;
 const int basisSuffix=3;
 const int basisSubdir=4;
 
-int readTable(const char* fileName,const char* baseSubdir, int numDims,int*dimSizes,int numBases,const char* bases[],int basisType,float **table,int*lb)
+int readTable(const char* fileName,const char* baseSubdir, int numDims,int*dimSizes,int numBases,const char* bases[],int basisType,float **table,int*lb,const char *bo[])
 {
     string fName,line,lTemp;
     ifstream inFile;
@@ -128,10 +128,47 @@ int readTable(const char* fileName,const char* baseSubdir, int numDims,int*dimSi
 
         for (int block=0;block<numBlocks;++block)
         {
+            string blockHeader="";
+            bool doBlockOrder=true;
             getline(inFile,line);
+            if (line[0]=='~')
+                blockHeader=line;
             while (line[0]=='~'||line[0]=='*')
+            {
                 getline(inFile,line);
+                if (line[0]=='~')
+                    blockHeader=line;
+            }
             getline(inFile,line);
+            //match block header (should we have one) to position in bo (slightly tricky as the enum values won't be in the same order)
+            int posnInBO;
+            if (blockHeader!="" and numBlocks>1)
+            {
+                blockHeader=blockHeader.replace(blockHeader.begin(),blockHeader.end()," ","");
+                blockHeader=blockHeader.replace(blockHeader.begin(),blockHeader.end(),"~","");
+                blockHeader=blockHeader.replace(blockHeader.begin(),blockHeader.end(),"+"," ");
+                istringstream iss(blockHeader);
+                for (posnInBO=1;posnInBO<=numBlocks;++posnInBO)//there's a dummy "" at the start of bo
+                {
+                    bool foundAll=true;
+                    string bit;
+                    string boHeader=bo[posnInBO];
+                    while (iss>>bit)
+                        if (bit!="")
+                            if (boHeader.find("+"+bit+"+")==string::npos)
+                            {
+                                foundAll=false;
+                                break;
+                            }
+                    if (foundAll)
+                        break;
+                }
+                --posnInBO;
+            }
+            else
+                doBlockOrder=false;
+            if (doBlockOrder)
+                tablePos=basis*numBlocks*numLines*lineLength+posnInBO*numLines*lineLength;//start of block allowing for order
             for (int ll=0;ll<numLines;++ll)
             {
                 l.clear();
