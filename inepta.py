@@ -25,9 +25,11 @@ multiBracket[0]=""
 for i in range(1,100):
     multiBracket[i]=br
     br+="[]"
-allowableSections=set(["BASIC","ESG","DATA","DERIVED","PHASE","END","TABLES","COMMON"])
-allowableBasicParams=set(["NAME","ARRAYED","TERM","START","FORCE","FIRSTPROJECTIONPERIOD","LASTPROJECTIONPERIOD","BATCHSIZEEXTERNAL","BATCHSIZEINTERNAL"])
-calcSettings={"STORE":True,"TYPE":True,"__NR1":False,"__NR2":False,"__R1":False,"__R2":False,"OUTPUT":False,"OVERWRITES":True,"CONSTANT":False}#does a further value follow the setting name?
+allowableSections=set(["BASIC","ESG","DATA","DERIVED","PHASE","END","TABLES","COMMON","INNERESG"])
+allowableBasicParams=set(["NAME","ARRAYED","TERM","START","FORCE","FIRSTPROJECTIONPERIOD","LASTPROJECTIONPERIOD","BATCHSIZEEXTERNAL","BATCHSIZEINTERNAL","INNERMODEL"])
+calcSettings={"STORE":True,"TYPE":True,"__NR1":False,"__NR2":False,"__R1":False,"__R2":False,"OUTPUT":False,"OVERWRITES":True,"CONSTANT":False,"CALL":False,"INNERSCENARIOS":False}#does a further value follow the setting name?
+allowableCallSettings=set(["NAME","ZEROISE","INITIALSTATE","STATEINPUT","MODEL","PHASE","INITIALISE","TERM","STOCHASTIC","INNERSCENARIOS","BASIS","WHEN","RETURNS"])
+allowableInnerModelCallSettings=set(["NAME","MODEL","NUMSCENS","TERM","BASIS","WHEN","THEPARAMS"])
 allowablecalcSettings=set(calcSettings.keys())
 allowablePhaseSettings=set(["NAME","DIRECTION","START","TERM"])
 allowableDirections=set(["FORWARDS","BACKWARDS","STATIC"])
@@ -54,6 +56,8 @@ modelInfos={}#name->modelInfo
 enums={}#name->(dict of names->integer)
 bases={}#name->basisInfo
 rebaseTimes=[]
+callInfos={}#name->callInfoObject
+innerModelCalls={}#name->inner model call object
 
 #classes
 class modelInfo(object):#persistent data for a model
@@ -73,6 +77,7 @@ class modelInfo(object):#persistent data for a model
         self.hasData=False
         self.hasDerived=False
         self.esg={}#only top model should have one of these, field name->list of dimension sizes
+        self.innerESG={}
         self.forceThese=[]#calcs to force
         self.maxStored=0#excluding store-alls
         self.firstProjectionPeriod=1
@@ -81,6 +86,7 @@ class modelInfo(object):#persistent data for a model
         self.batchSizeExternal=1000000
         self.batchSizeInternal=50000
         self.storeAllPosn={}#calc name-> (tuple of store-all index (low,high)).
+        self.innerModel=""#name of inner file (in library subdir) containing inner ESG Futhark code
 
 class dataFieldInfo(object):#covers derived fields as well
     def __init__(self):
@@ -118,12 +124,39 @@ class calcInfoObject:
         self.isRebase=False#calculated by whole array calc by rebasing (once for each R basis)
         self.myPhase=None
         self.isConstant=False
+        self.isInnerScenarios=False
 
 class basisInfoObject:#might be OTT
     def __init__(self):
         self.name=""
         self.isRebase=False
         self.subBases=[]#list of names
+
+class callInfoObject:
+    def __init__(self):
+        self.name=""
+        self.zeroise=False#start from the zeroised state
+        self.initialState=""#name of call to use for the first time in a loop
+        self.stateInput=""#input call-state to call (of this submodel) (NB the only other input will be the top models current state)
+        self.model=None
+        self.phase=None
+        self.initalise=False#whether or not to call initialise for the phase
+        self.term=0
+        self.isStochastic=False
+        self.innerScenarios=""#name of inner senarios call
+        self.basis=""#basis name
+        self.when=""#time expresssion
+        self.returns="Both"#state, output, both e.g. not interested in final state(s) for an inner stochastic run
+
+class innerModelCallObject:
+    def __init__(self):
+        self.name=""#name of call
+        self.model=""#the inner model
+        self.numScens=0
+        self.term=0
+        self.basis=""#TODO how will this work?
+        self.when=""#time expression
+        self.theParams=[]#all the actual model parameters
 
 #utilities
 #eliminate white space,capitalise,check if it's a comment and split on multiple delimiters
@@ -162,6 +195,7 @@ numBases=0#1 per basis
 numActualBases=0#1 per subbasis
 numRebased=0#1 per subbasis
 numNonRebased=0#1 per subbasis
+topModel=None
 off=open(exeSubDir+"/"+"futhark.fut",'w')
 
 #read enum info
@@ -215,6 +249,10 @@ def readBasicModelInfo(mfn):
                     if lsu[i] not in allowablecalcSettings:
                         doErr("Unknown setting for calc: ",l)
                     skipItem=calcSettings[lsu[i]]#do we skip the next item?
+                    if lsu[i]=="CALL":
+                        ci.isCall=True
+                    if lsu[i]=="INNERSCENARIOS":
+                        ci.isInnerScenarios=True
                     if lsu[i]=="OUTPUT":
                         ci.isOutput = True
                         if outputMode=="VECTOR":
@@ -275,6 +313,9 @@ def readBasicModelInfo(mfn):
                     doErr("Unknown basic parameter ",ls[0])
                 if lsu[0]=="NAME":
                     mi.name=ls[1]
+                    if lsu[1]=="TOP":
+                        global topModel
+                        topModel=mi
                 if lsu[0] == "ARRAYED":
                     if ls[1].isnumeric():
                         mi.isArrayed=True
@@ -296,6 +337,8 @@ def readBasicModelInfo(mfn):
                     mi.batchSizeExternal=int(ls[1])
                 if lsu[0] == "BATCHSIZEINTERNAL":
                     mi.batchSizeInternal = int(ls[1])
+                if lsu[0] == "INNERMODEL":
+                    mi.innerModel=ls[1]
             if section == "DATA" or section == "DERIVED":
                 mi.hasData=True
                 df=dataFieldInfo()
@@ -355,13 +398,7 @@ def readBasicModelInfo(mfn):
                         skipItem = True
             if section =="CALC":
                 l=l.strip()
-                if l[0:4].upper()=="CALL":
-                    ci.isCall=True
-                    ci.name=l[4:].strip()
-                    currPhase[ls[0]] = ci
-                    ci.stores=-2
-                    continue
-                elif lsu[0]=="INITIALISE":
+                if lsu[0]=="INITIALISE":
                     ci.initialisation=l
                 else:
                     if firstLine:
@@ -430,6 +467,12 @@ def readBasicModelInfo(mfn):
                     mi.esg[fieldInfo[0]]=[1]
                 else:
                     mi.esg[fieldInfo[0]] = [int(fieldInfo[i]) for i in range(1,len(fieldInfo))]
+            if section=="INNERESG":
+                (fieldInfo,_,_)=nwscap(l,"[]")
+                if len(fieldInfo)==1:
+                    mi.innerESG[fieldInfo[0]]=[1]
+                else:
+                    mi.innerESG[fieldInfo[0]] = [int(fieldInfo[i]) for i in range(1,len(fieldInfo))]
 
     ift.close()
     return mi
@@ -482,6 +525,8 @@ for l in ift.readlines():
             continue
         if section=="MODELS":
             modelInfos[ls[0]]=readBasicModelInfo(modelSubDir + "/" + ls[0] + ".model")
+            if modelInfos[ls[0]].name=="top":#will not keep topModel with others
+                del modelInfos[ls[0]]
         if section=="BASES":
             if numBases==0 and ls[0]!="Experience":
                 doErr("First basis must be Experience: ",l)
@@ -519,6 +564,10 @@ for l in ift.readlines():
                 (rebaseTimes,_,_) = nwscap(ll,",")
             if not l.__contains__(","):
                 print("Warning: No commas in rebase times.  Is this the intention?")
+
+#in certain cases we might want to process the top model with the others
+modelInfosPlus=modelInfos.copy()
+modelInfosPlus["top"]=topModel
 
 #enum for actual bases plus rebase info which may be read from run parameters instead in future developments
 doRebase="["
@@ -560,6 +609,13 @@ ift=open(libSubDir+"/"+"library.fut",'r')
 for l in ift.readlines():
     off.write(l)
 ift.close()
+
+#inner ESG model code - added verbatim
+if isDependent and topModel.innerModel!="":
+    ift = open(libSubDir + "/" + topModel.innerModel+".fut", 'r')
+    for l in ift.readlines():
+        off.write(l)
+    ift.close()
 
 def convUserFn(l):
     #repeatedly look for user defined functions and replace f(,,) with (f () () )
@@ -922,19 +978,20 @@ for l in ift.readlines():
 ift.close()
 off.write(nl)
 
-numOutputs=0#allow for array size (1d only)
-for mi in modelInfos.values():
-    for ph in mi.phases.values():
-        for ci in ph.values():
-            if ci.isOutput:
-                if not ci.isArrayed:
-                    numOutputs+=1
-                else:
-                    numOutputs+=ci.dimSizes[0]
-off.write("let numOutputs:i32="+str(numOutputs)+nl)
-
 if not isDependent:
     mName=list(modelInfos.keys())[0]
+    indModel=modelInfos[mName]
+
+numOutputs=0#allow for array size (1d only)
+mi=(topModel if isDependent else indModel)
+for ph in mi.phases.values():
+    for ci in ph.values():
+        if ci.isOutput:
+            if not ci.isArrayed:
+                numOutputs+=1
+            else:
+                numOutputs+=ci.dimSizes[0]
+off.write("let numOutputs:i32="+str(numOutputs)+nl)
 
 #enums
 off.write(nl)
@@ -943,17 +1000,15 @@ for enum in enums.values():
         off.write("let "+k+":i32="+str(v)+nl)
 
 #other system constants
-for mi in modelInfos.values():
-    off.write("let firstprojectionperiod:i32=("+str(mi.firstProjectionPeriod)+")"+nl)
-    off.write("let lastprojectionperiod:i32=(" + str(mi.lastProjectionPeriod) + ")" + nl)
-    off.write("let firstProjectionPeriod:i32=("+str(mi.firstProjectionPeriod)+")"+nl)
-    off.write("let lastProjectionPeriod:i32=(" + str(mi.lastProjectionPeriod) + ")" + nl)
-    off.write("let numPeriods:i32=lastProjectionPeriod-firstProjectionPeriod+1" + nl)
-    off.write("let numScens:f32="+str(numScens)+nl)
-    numPeriods=mi.lastProjectionPeriod-mi.firstProjectionPeriod+1
-    break
+off.write("let firstprojectionperiod:i32=("+str(mi.firstProjectionPeriod)+")"+nl)
+off.write("let lastprojectionperiod:i32=(" + str(mi.lastProjectionPeriod) + ")" + nl)
+off.write("let firstProjectionPeriod:i32=("+str(mi.firstProjectionPeriod)+")"+nl)
+off.write("let lastProjectionPeriod:i32=(" + str(mi.lastProjectionPeriod) + ")" + nl)
+off.write("let numPeriods:i32=lastProjectionPeriod-firstProjectionPeriod+1" + nl)
+off.write("let numScens:f32="+str(numScens)+nl)
+numPeriods=mi.lastProjectionPeriod-mi.firstProjectionPeriod+1
 
-#data-record types
+#data-record types (does not apply to top)
 off.write(nl)
 for mi in modelInfos.values():
     off.write("type data_"+mi.name+"={"+nl)
@@ -971,7 +1026,7 @@ for mi in modelInfos.values():
         comma=","
     off.write("}\n")
 
-#data conversion functions
+#data conversion functions (does not apply to top)
 off.write(nl)
 for mi in modelInfos.values():
     off.write("let dataFromArrays_"+mi.name+" [nr] (dataInt:[nr][]i32) (dataReal:[nr][]f32):[]data_"+mi.name+"="+nl)
@@ -1010,7 +1065,7 @@ for mi in modelInfos.values():
     dataFieldsReal=dataFieldsReal[0:len(dataFieldsReal)-1]
     off.write("map2 (\\x y :data_"+mi.name+"->{"+dataFieldsInt+dataFieldsReal+"}) dataInt dataReal"+nl)
 
-#derived types
+#derived types (does not apply to top)
 off.write(nl)
 for mi in modelInfos.values():
     if mi.hasDerived:
@@ -1029,9 +1084,9 @@ for mi in modelInfos.values():
             comma = ","
         off.write("}\n")
 
-# various state types including containers for past values and the all-state
+# various state types including containers for past values and the all-state.  This does apply to top.
 haveAll=False
-for mi in modelInfos.values():
+for mi in modelInfosPlus.values():
     maxStored = 0
     for ph in mi.phases.values():
         for ci in ph.values():  # find maximum storage
@@ -1128,14 +1183,17 @@ for mi in modelInfos.values():
                         inds_added[ci.name]=inds_added[ci.overwrites]
     off.write("let numSAs:i32="+str(i_count)+nl)
 
-#scenario type and conversion function
+#scenario type and conversion function (including inner scenarios, if present)
 hasESG=False
-for mi in modelInfos.values():
-    if mi.esg!={}:
+mi=(topModel if isDependent else indModel)
+for i in range(0,(2 if isDependent else 1)):#scen, inner scen
+    if i==0 and mi.esg!={} or i==1 and mi.innerESG!={}:
         hasESG=True
-        off.write("\ntype oneScen={\n")#scenario type
+        esgt=("Inner" if i==1 else "")
+        esg=(mi.esg if i==0 else mi.innerESG)
+        off.write("\ntype oneScen"+esgt+"={\n")#scenario type
         comma=""
-        for (k,v) in mi.esg.items():
+        for (k,v) in esg.items():
             off.write(comma+k+":[]")
             if v!=[1]:
                 for i in v:
@@ -1143,9 +1201,9 @@ for mi in modelInfos.values():
             off.write("f32\n")
             comma=","
         off.write("}\n\n")
-        off.write("let oneScenFromArray [np][nc] (scen:[np][nc]f32): oneScen=\n")#convert one scenario (1 index of the outer dimension of the scenario file) to a oneScen
+        off.write("let oneScen"+esgt+"FromArray [np][nc] (scen:[np][nc]f32): oneScen"+esgt+"=\n")#convert one scenario (1 index of the outer dimension of the scenario file) to a oneScen
         colCount=0
-        for (k,v) in mi.esg.items():#get arrays
+        for (k,v) in esg.items():#get arrays
             if v==[1]:#scalar
                 off.write("\tlet "+k+"=scen[:,"+str(colCount)+"]"+nl)
                 colCount+=1
@@ -1157,13 +1215,12 @@ for mi in modelInfos.values():
                 colCount+=v[0]*v[1]
         off.write("\n\tin\n\t{")
         comma=""
-        for (k,v) in mi.esg.items():#pack arrays in record
+        for (k,v) in esg.items():#pack arrays in record
             off.write(comma+k+"="+k)
             comma=","
         off.write("}\n")
-        off.write("\nlet scensFromArrays(scens: [][][]f32):[]oneScen =\n")#convert whole scenario file to array of oneScens
-        off.write("\tmap oneScenFromArray scens\n")
-        break
+        off.write("\nlet scens"+esgt+"FromArrays(scens: [][][]f32):[]oneScen"+esgt+" =\n")#convert whole scenario file to array of oneScens
+        off.write("\tmap oneScen"+esgt+"FromArray scens\n")
 
 #main function
 off.write(nl)
@@ -1171,35 +1228,45 @@ off.write("let main ")
 off.write(" [numBases] ")
 for mi in modelInfos.values():#data files
     if mi.hasData:
-        off.write(" [numPols] ")
+        off.write(" [numPols"+("_"+mi.name if not isDependent else "")+"] ")
         break
 if hasESG:
     off.write(" (scensData:[][][]f32) ")
 for mi in modelInfos.values():#data files
     if mi.hasData:
-        off.write("(fileDataInt_"+mi.name+":[numPols][]i32) (fileDataReal_"+mi.name+":[numPols][]f32)")
-for mi in modelInfos.values():#tables and their lower bounds (for (possibly) inner 2 dimensions)
+        off.write("(fileDataInt_"+mi.name+":[numPols"+("_"+mi.name if not isDependent else "")+"][]i32) (fileDataReal_"+mi.name+":[numPols"+("_"+mi.name if not isDependent else "")+"][]f32)")
+for mi in modelInfosPlus.values():#tables and their lower bounds (for (possibly) inner 2 dimensions)
     for t in mi.tableInfos.values():
         off.write(" (table_"+t.name+"_"+mi.name+":"+("[numBases]" if t.basis!="SINGLE" else "")+multiBracket[len(t.dims)]+"f32)"+(" (lb_"+t.name+"_"+mi.name+":[]i32)" if t.dim1HasLB or t.dim2HasLB else ""))
 off.write(":"+("[]" if outputMode=="VECTOR" else "")+"[]f32="+nl)
 
 off.write("\nunsafe\n\n")
 
+#Are there NR or R bases?
+haveNR=False
+haveR=False
+for b in bases.values():
+    if b.name!="Experience" and not b.isRebase:
+        haveNR=True
+    if b.name!="Experience" and b.isRebase:
+        haveR=True
+
 #rebase times
-off.write("\nlet rbtrue=replicate (length rebaseTimes) true" + nl)
-off.write("let rbts:*[]bool = replicate numPeriods" + " false " + nl)
-off.write("let isRebaseTime:*[]bool=(replicate (-firstprojectionperiod) false)++(scatter rbts rebaseTimes rbtrue)\n")#NB add falses to front for -ve start times
+if haveR:
+    off.write("\nlet rbtrue=replicate (length rebaseTimes) true" + nl)
+    off.write("let rbts:*[]bool = replicate numPeriods" + " false " + nl)
+    off.write("let isRebaseTime:*[]bool=(replicate (-firstprojectionperiod) false)++(scatter rbts rebaseTimes rbtrue)\n")#NB add falses to front for -ve start times
 
 # create dummy calcInfo for use in common code and setDerived, no need to set fields (defaults are fine) except code and that is set at the point of use
 dummyCi=calcInfoObject()
 dummyCi.myPhase="phase0"
 
-#convert scenarios
+#convert (outer) scenarios
 if hasESG:
     off.write("let scens=scensFromArrays scensData"+nl)
 
-#common code - i.e outside calcs - can really access only tables or call user-defined functions
-for mi in modelInfos.values():
+#common code - i.e outside calcs - can really access only tables or call user-defined functions (there are no assumptions or checks about dependencies betwen models)
+for mi in modelInfosPlus.values():
     dummyCi.code=mi.commonCode
     dummyCi.lhs=""
     convCode(mi, dummyCi, CALCCODE)
@@ -1229,7 +1296,7 @@ for mi in modelInfos.values():
 
 #bind constants to array LBs to avoid excess indexing
 off.write(nl)
-for mi in modelInfos.values():
+for mi in modelInfosPlus.values():
     for t in mi.tableInfos.values():
         if t.dim2HasLB or t.dim1HasLB:
             off.write("let lb_"+t.name+"_"+mi.name+"_1="+(" lb_"+t.name+"_"+mi.name+"[0]" if t.dim2HasLB else "0i32")+nl)
@@ -1250,7 +1317,7 @@ for mi in modelInfos.values():
 #initialisation functions for setting initial state based on whether we want resume from where we left off in the (non-static) previous phase, or not.
 #two functions actually, for state and for store-alls
 for initMode in range(0,(1 if not haveAll else 2)):#ordinary, store-all
-    for mi in modelInfos.values():
+    for mi in modelInfosPlus.values():
         for (phName,ph) in mi.phases.items():#init fn for a phase
             if mi.phaseDirections[phName]=="static":
                 continue#no initialisation for static, as it's not a run through time
@@ -1272,6 +1339,8 @@ for initMode in range(0,(1 if not haveAll else 2)):#ordinary, store-all
             inited=set()#who was initialised; for with" purposes
             for ci in ph.values():
                 initCode=""
+                if ci.isCall or ci.isInnerScenarios:
+                    continue
                 if (initMode==0 and ci.stores>0 or initMode==1 and ci.stores==-1) and ci.initialisation!="":
                     convCode(mi,ci,INITIALISATION)
                     for fld in ci.fieldsCalcd:#record which calcs were initialised (used with "with" in state creation)
@@ -1449,15 +1518,6 @@ for mi in modelInfos.values():
                 off.write("let  runNPeriods_"+mi.name+"_"+phName+" (n:i32) (as:state_"+mi.name+"_all):state_"+mi.name+"_all="+nl)
                 off.write("\t(iterate n runOnePeriod_"+mi.name+"_"+phName+") as"+nl)
 
-#Are there NR bases?
-haveNR=False
-haveR=False
-for b in bases.values():
-    if b.name!="Experience" and not b.isRebase:
-        haveNR=True
-    if b.name!="Experience" and b.isRebase:
-        haveR=True
-
 #functions to do NR runs: phase 1 runNPeriod.  The latter also stores the __NR1 calcs in the correct place in s/a (in the store function)
 if haveNR:
     for mi in modelInfos.values():
@@ -1505,231 +1565,348 @@ if haveR:
         else:
             off.write("in (as,storeAll)\n")
 
-#function to run experience basis (phase 1).  Look like runNPeriods but also calls calcRebased... if it's a rebase time
-if haveAll:
-    off.write("\nlet runExperience_"+mi.name+" (as:state_"+mi.name+"_all) (storeAll:*[][]f32) (n:i32):(state_"+mi.name+"_all,*[][]f32)="+nl)
-    off.write("\tloop (as':state_" + mi.name + "_all,storeAll':*[][]f32)=\n")
-    off.write("\t(as,storeAll) for i<n do\n")
-    if haveR:
-        off.write("\tif !isRebaseTime[as.i_t+1] then"+nl)
-    off.write("\trunOnePeriod_" + mi.name + "_phase1 as' storeAll'" + nl)
-    if haveR:
-        off.write("\telse\n")
-        off.write("\tcalcRebasedResults_"+mi.name+"(runOnePeriod_" + mi.name + "_phase1 as' storeAll')" + nl)
-else:
-    off.write("\nlet runExperience_"+mi.name+"=runNPeriods_"+mi.name+"_phase1"+nl)
+#function to run experience basis (phase 1) (only applies if independent).  Look like runNPeriods but also calls calcRebased... if it's a rebase time
+if not isDependent:
+    if haveAll:
+        off.write("\nlet runExperience_"+mi.name+" (as:state_"+mi.name+"_all) (storeAll:*[][]f32) (n:i32):(state_"+mi.name+"_all,*[][]f32)="+nl)
+        off.write("\tloop (as':state_" + mi.name + "_all,storeAll':*[][]f32)=\n")
+        off.write("\t(as,storeAll) for i<n do\n")
+        if haveR:
+            off.write("\tif !isRebaseTime[as.i_t+1] then"+nl)
+        off.write("\trunOnePeriod_" + mi.name + "_phase1 as' storeAll'" + nl)
+        if haveR:
+            off.write("\telse\n")
+            off.write("\tcalcRebasedResults_"+mi.name+"(runOnePeriod_" + mi.name + "_phase1 as' storeAll')" + nl)
+    else:
+        off.write("\nlet runExperience_"+mi.name+"=runNPeriods_"+mi.name+"_phase1"+nl)
 
-# main function for running a single policy (independent)
-# signature
-for mi in modelInfos.values():#only 1 model
-    break
-off.write(nl)
-off.write("\nlet runOnePol_" + mi.name)
-if hasESG and not isStochastic:
-    off.write(" (scen:oneScen) ")
-if mi.hasData:
-    off.write("(pol:data_" + mi.name + ") ")
-if mi.hasDerived:
-    off.write("(der:derived_" + mi.name + ")")
-if isStochastic:#different position of scens to allow easy map thereover
-    off.write(" (scen:oneScen) ")
-off.write(":"+("[]" if outputMode=="VECTOR" else "")+"[]f32 =" + nl)
+# main function for running a single policy (independent case only)
+if not isDependent:
+    # signature
+    for mi in modelInfos.values():#only 1 model
+        break
+    off.write(nl)
+    off.write("\nlet runOnePol_" + mi.name)
+    if hasESG and not isStochastic:
+        off.write(" (scen:oneScen) ")
+    if mi.hasData:
+        off.write("(pol:data_" + mi.name + ") ")
+    if mi.hasDerived:
+        off.write("(der:derived_" + mi.name + ")")
+    if isStochastic:#different position of scens to allow easy map thereover
+        off.write(" (scen:oneScen) ")
+    off.write(":"+("[]" if outputMode=="VECTOR" else "")+"[]f32 =" + nl)
 
-#Define the store-all array
-if haveAll:
-    off.write("let storeAll:*[][]f32=copy (undef2 numSAs (numPeriods+1))\n")#one extra period for initialisation
+    #Define the store-all array
+    if haveAll:
+        off.write("let storeAll:*[][]f32=copy (undef2 numSAs (numPeriods+1))\n")#one extra period for initialisation
 
-#initialise all-state for either phase0 (if it exists) or phase1.  Need to initialise both state and store-all
-hasPhase0 = mi.phases.keys().__contains__("phase0")
-if hasPhase0:
-    initPhase="phase0"
-else:
-    initPhase="phase1"
+    #initialise all-state for either phase0 (if it exists) or phase1.  Need to initialise both state and store-all
+    hasPhase0 = mi.phases.keys().__contains__("phase0")
+    if hasPhase0:
+        initPhase="phase0"
+    else:
+        initPhase="phase1"
 
 #create a zeroised state explicitly (this is so that all initialisation functions can have the same pattern of using "with"
-off.write("\nlet init_state:state_"+mi.name+"={"+nl)
-comma=""
-for (phName, ph) in mi.phases.items():
-    for ci in ph.values():
-        if ci.stores > 0 or (ci.isOutput and outputMode=="SCALAR") or ci.isConstant:
-            for fld in ci.fieldsCalcd:
-                if not ci.isArrayed:
-                    off.write(comma+fld+"=0\n")
-                else:
-                    off.write(comma+fld+"=zeros"+("i" if ci.type=="int" else "")+str(ci.numDims)+" "+"".join([str(i)+" " for i in ci.dimSizes])+nl)
-                comma = ","
-off.write("}\n")
-
-#create an all-state explicitly, this also involves explictly creating records for past values
-off.write("\nlet init_as:state_"+mi.name+"_all={\n")
-off.write("p = pol,"+nl)
-off.write("der = der,"+nl)
-off.write("state__1 = init_state,"+nl)
-for i in range(2, maxStored + 1):#past values records
-    off.write("state__" + str(i) + "={")
+for mi in modelInfosPlus.values():
+    off.write("\nlet zero_state_"+mi.name+":state_"+mi.name+"={"+nl)
     comma=""
     for (phName, ph) in mi.phases.items():
         for ci in ph.values():
-            if ci.stores >=i:
+            if ci.stores > 0 or (ci.isOutput and outputMode=="SCALAR") or ci.isConstant:
                 for fld in ci.fieldsCalcd:
                     if not ci.isArrayed:
                         off.write(comma+fld+"=0\n")
                     else:
                         off.write(comma+fld+"=zeros"+("i" if ci.type=="int" else "")+str(ci.numDims)+" "+"".join([str(i)+" " for i in ci.dimSizes])+nl)
                     comma = ","
-    off.write("},\n")
-off.write("t = firstProjectionPeriod,"+nl)
-off.write("i_t = 0,"+nl)
-off.write("basisNum = 0,"+nl)
-off.write("forceTheIssue=0")
-off.write("}\n")
-off.write(nl)
+    off.write("}\n")
 
-#initialise either for phase0 or 1
-if haveAll:
-    off.write("let (init_as_pre_"+initPhase+",storeAll') = init_" + mi.name + "_"+initPhase+"_all init_as"+(" scen " if hasESG else "")+" 0 storeAll \n")
-    off.write("let storeAll_pre_"+initPhase+" = init_" + mi.name + "_"+initPhase+"_storeAll  0 init_as "+ (" scen " if hasESG else "")+" storeAll' \n")
-else:
-    off.write("let init_as_pre_"+initPhase+" = init_" + mi.name + "_"+initPhase+"_all init_as"+(" scen " if hasESG else "")+" 0 \n")
-
-#run phase 0, should it exist,  TODO; term is fixed: it runs to firstprojectionperiod
-if hasPhase0:
-    if haveAll:
-        off.write("let (init_as_post_phase0,storeAll_post_phase0)=runNPeriods_"+mi.name+"_phase0 "+" (-firstprojectionperiod) "+" init_as_pre_phase0 storeAll_pre_phase0"+nl)
-    else:
-        off.write("let init_as_post_phase0=runNPeriods_"+mi.name+"_phase0 "+" (-firstprojectionperiod) "+" init_as_pre_phase0 "+nl)
-    # initialise all-state (and store-all) for phase1 (if not already set up)
-    if haveAll:
-        off.write("let (init_as_pre_phase1,storeAll'') = init_" + mi.name + "_phase1_all init_as_post_phase0"+(" scen " if hasESG else "")+" 0 storeAll_post_phase0 \n")
-        off.write("let storeAll_pre_phase1 = init_" + mi.name + "_phase1_storeAll  0 init_as_post_phase0 "+ (" scen " if hasESG else "")+" storeAll'' \n")
-    else:
-        off.write("let init_as_pre_phase1 = init_" + mi.name + "_phase1_all init_as_post_phase0"+(" scen " if hasESG else "")+" 0 \n")
-
-#run NR bases if they exist, bases only: "store" will replicate the calc results over subbases
-bn=1
-sa_c=0
-if haveAll:
-    off.write("let storeAllNR0=storeAll_pre_phase1" + nl)
-for b in bases.values():
-    if not b.isRebase and b.name!="Experience":
-        off.write("let storeAllNR"+str(sa_c+1)+"=runNRBasis_"+mi.name+" init_as_pre_phase1 storeAllNR"+str(sa_c)+" "+str(bn)+nl)
-        bn += (1 if b.subBases==[] else len(b.subBases))
-        sa_c+=1
-if bn>1:
-    off.write("let storeAll_postNR=storeAllNR"+str(sa_c)+nl)
-else:
-    if haveAll:
-        off.write("let storeAll_postNR=storeAll_pre_NR"+nl)
-
-#as in static-phases, generate functions from the __NR2 calcs and apply to the s/a
-#it is assumed that the calc formulae themselves have the ability to cope with bases/subbases
-if bn>1:
-    revd = []
-    ph = mi.phases["phase1"]
-    for ci in ph.values():  # order is "just as it comes" (TODO make sure dict does not mess up the order)
-        if ci.isNonRebase and ci.isWholeArray:
-            revd = [ci.name] + revd
-            off.write(nl)
-            convCode(mi, ci, CALCCODE)  # write calc's code, this case a storeAll->storeAll fn
-    call = "storeAll_postNR"
-    for fn in revd:  # call of call of...
-        call = fn + "(" + call + ")"
-    off.write("\nlet storeAllPostNR2 = " + call + nl)
-else:
-    if haveAll:
-        off.write("\nlet storeAllPostNR2 = storeAllPostNR\n")
-
-#Run experience basis (phase1)- with rebasing
-if mi.dataFieldInfos[mi.termField].expression=="":
-    termBit="(pol."+mi.termField+"-"+mi.phaseStart["phase1"]+")"
-else:
-    termBit="(der."+mi.termField+"-"+mi.phaseStart["phase1"]+")"
-if haveAll:
-    off.write("\nlet (as_post_phase1,storeAllPostphase1)=runExperience_"+mi.name+" init_as_pre_phase1 storeAllPostNR2 "+termBit+nl)
-else:
-    off.write("\nlet as_post_phase1=runExperience_"+mi.name+" "+termBit+" init_as_pre_phase1 "+nl)
-
-#remaining phases
-phC=0
-phSkip=1+(1 if hasPhase0 else 0)#number of phases already carried out
-prevPhName="phase1"
-for (phName, ph) in mi.phases.items():
-    phC+=1
-    if phC>phSkip:
-        off.write(nl)
-        if mi.phaseDirections[phName]=="static":#run eiher N periods or static-phase
-            off.write("let storeAllPost"+phName+"=runStaticPhase_"+mi.name+"_"+phName+" (storeAllPost"+prevPhName+")"+nl)
-            off.write("let as_post_"+phName+"=as_post_"+prevPhName+nl)#keep all-state the same
-        else:
-            if mi.phaseStart[phName]!="previousTime":
-                strt=mi.phaseStart[phName]
-            else:
-                strt="as_post_"+prevPhName+".t"
-            dummyCi=calcInfoObject()
-            dummyCi.name = ""
-            dummyCi.lhs = "phTerm="
-            dummyCi.initialisation = mi.phaseTerm[phName]
-            dummyCi.myPhase=phName
-            convCode(mi, dummyCi, DERIVED)
-            if haveAll:
-                off.write("let (as_pre_"+phName+",storeAllPost"+prevPhName+"')=init_"+mi.name+"_"+phName+"_all as_post_"+prevPhName+(" scen " if hasESG else "")+" 0 storeAllPost"+prevPhName+nl)#initialisation from previous phase (all-state and store-all).
-                off.write("let storeAllPre"+phName+"=init_"+mi.name+"_"+phName+"_storeAll 0 as_post_"+prevPhName+(" scen " if hasESG else "")+" storeAllPost"+prevPhName+"'"+nl)#initialisation from previous phase (all-state and store-all).
-                off.write("let (as_post_"+phName+",storeAllPost"+phName+")=runNPeriods_" + mi.name +"_"+phName+" phTerm as_pre_"+phName+" storeAllPre"+phName + nl)#run phase
-            else:
-                off.write("let as_pre_"+phName+"=init_"+mi.name+"_"+phName+"_all as_post_"+prevPhName+(" scen " if hasESG else "")+" 0 "+nl)#initialisation from previous phase (all-state and store-all).
-                off.write("let as_post_"+phName+"=runNPeriods_" + mi.name +"_"+phName+" phTerm as_pre_"+phName+nl)#run phase
-        prevPhName=phName
-
-#output from run one pol
-off.write(nl)
-results="["
-for (phName, ph) in mi.phases.items():#get output calcs and assemble their 1-d (over time) arrays as a 2-d array
-    comma=""
-    for ci in ph.values():
-        if ci.isOutput:
-            if outputMode=="VECTOR":
-                if not ci.isArrayed:
-                    results+=comma+"storeAllPost"+prevPhName+"[i_"+mi.name+"_"+ci.name+"]"
-                    comma = ","
-                else:
-                    for i in range(0,ci.dimSizes[0]):
-                        results += comma + "storeAllPost" + prevPhName + "[i_" + mi.name + "_"+ci.name +"+"+ str(i)+"]"
-                        comma = ","
-            else:
-                if not ci.isArrayed:
+    #create an all-state explicitly, this also involves explictly creating records for past values - for the dependent case this is a function
+    off.write("\nlet zero_as_"+mi.name+(" (pol:data_"+mi.name+") " if isDependent and mi.hasData else "")+(" (der:derived_"+mi.name+") " if isDependent and mi.hasDerived else "")+":state_"+mi.name+"_all={\n")
+    if mi.hasData:
+        off.write("p = pol,"+nl)
+    if mi.hasDerived:
+        off.write("der = der,"+nl)
+    off.write("state__1 = zero_state_"+mi.name+","+nl)
+    for i in range(2, maxStored + 1):#past values records
+        off.write("state__" + str(i) + "={")
+        comma=""
+        for (phName, ph) in mi.phases.items():
+            for ci in ph.values():
+                if ci.stores >=i:
                     for fld in ci.fieldsCalcd:
-                        results+=comma+"as_post_"+prevPhName+".state__1."+fld
+                        if not ci.isArrayed:
+                            off.write(comma+fld+"=0\n")
+                        else:
+                            off.write(comma+fld+"=zeros"+("i" if ci.type=="int" else "")+str(ci.numDims)+" "+"".join([str(i)+" " for i in ci.dimSizes])+nl)
                         comma = ","
-                else:
-                    for i in range(0,ci.dimSizes[0]):
-                        results += comma + "as_post_" + prevPhName + ".state__1."+ci.name+"["+str(i)+"]"
-                        comma = ","
-
-results+="]"
-off.write("in "+results+nl)
-
-#run one policy on all scenarios, for stochastic
-if isStochastic:
-    off.write("\nlet runOnePolAllScens_"+mi.name+" (scens:[]oneScen) (pol:data_"+mName+") (der:derived_"+mName+"):[]f32 ="+nl)
-    off.write("let allSimsResults:[][]f32=map (runOnePol_"+mi.name+" pol der) scens"+nl)
-    off.write("let sumSims = reduce (+.+) (zeros1 numOutputs) allSimsResults"+nl)
-    off.write("in map (/numScens) sumSims\n")
-
-#batches of policies, if required
-if mi.batchSizeInternal>0:
-    off.write("\nlet batchSize:i32="+str(mi.batchSizeInternal)+nl)
-    off.write("let numBatches=if numPols%%batchSize==0 then (numPols//batchSize) else (numPols//batchSize+1)\n")
-    off.write("let sumOfBatches=\n")
-    off.write("\tloop sumOfBatches':"+("[]" if outputMode=="VECTOR" else "")+"[][]f32=(zeros"+("3" if outputMode=="VECTOR" else "2")+" batchSize "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" for i<numBatches do\n")
-    off.write("\tlet lo=i*batchSize\n")
-    off.write("\tlet hi=mini ((i+1i32)*batchSize) numPols\n")
-    off.write("\tlet batchRes = map2 (runOnePol"+("AllScens" if isStochastic else "")+"_"+mName+(" scens"+("[0]"if not isStochastic else "")+")" if hasESG else ")")+" fileData_"+mName+"[lo:hi] derived_"+mName+"[lo:hi]\n")
-    off.write("\tin sumOfBatches' +."+("." if outputMode=="VECTOR" else "")+".+ batchRes\n")
-    off.write("in reduce (+."+("." if outputMode=="VECTOR" else "")+"+) (zeros"+("2" if outputMode=="VECTOR" else "1")+" "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" sumOfBatches\n")
-else:
+        off.write("},\n")
+    off.write("t = firstProjectionPeriod,"+nl)
+    off.write("i_t = 0,"+nl)
+    off.write("basisNum = 0,"+nl)
+    off.write("forceTheIssue=0")
+    off.write("}\n")
     off.write(nl)
-    off.write("let res = map2 (runOnePol"+("AllScens" if isStochastic else "")+"_"+mName+(" scens"+("[0]"if not isStochastic else "")+")" if hasESG else ")")+" fileData_"+mName+" derived_"+mName+nl)
-    off.write("in reduce (+."+("." if outputMode=="VECTOR" else "")+"+) (zeros"+("2" if outputMode=="VECTOR" else "1")+" "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" res\n")
+
+#all the special stuff for the independent case
+if not isDependent:
+    # initialise either for phase0 or 1
+    if haveAll:
+        off.write("let (init_as_pre_"+initPhase+",storeAll') = init_" + mi.name + "_"+initPhase+"_all zero_as"+(" scen " if hasESG else "")+" 0 storeAll \n")
+        off.write("let storeAll_pre_"+initPhase+" = init_" + mi.name + "_"+initPhase+"_storeAll  0 zero_as "+ (" scen " if hasESG else "")+" storeAll' \n")
+    else:
+        off.write("let init_as_pre_"+initPhase+" = init_" + mi.name + "_"+initPhase+"_all init_as"+(" scen " if hasESG else "")+" 0 \n")
+
+    #run phase 0, should it exist,  TODO; term is fixed: it runs to firstprojectionperiod
+    if hasPhase0:
+        if haveAll:
+            off.write("let (init_as_post_phase0,storeAll_post_phase0)=runNPeriods_"+mi.name+"_phase0 "+" (-firstprojectionperiod) "+" init_as_pre_phase0 storeAll_pre_phase0"+nl)
+        else:
+            off.write("let init_as_post_phase0=runNPeriods_"+mi.name+"_phase0 "+" (-firstprojectionperiod) "+" init_as_pre_phase0 "+nl)
+        # initialise all-state (and store-all) for phase1 (if not already set up)
+        if haveAll:
+            off.write("let (init_as_pre_phase1,storeAll'') = init_" + mi.name + "_phase1_all init_as_post_phase0"+(" scen " if hasESG else "")+" 0 storeAll_post_phase0 \n")
+            off.write("let storeAll_pre_phase1 = init_" + mi.name + "_phase1_storeAll  0 init_as_post_phase0 "+ (" scen " if hasESG else "")+" storeAll'' \n")
+        else:
+            off.write("let init_as_pre_phase1 = init_" + mi.name + "_phase1_all init_as_post_phase0"+(" scen " if hasESG else "")+" 0 \n")
+
+    #run NR bases if they exist, bases only: "store" will replicate the calc results over subbases
+    bn=1
+    sa_c=0
+    if haveAll:
+        off.write("let storeAllNR0=storeAll_pre_phase1" + nl)
+    for b in bases.values():
+        if not b.isRebase and b.name!="Experience":
+            off.write("let storeAllNR"+str(sa_c+1)+"=runNRBasis_"+mi.name+" init_as_pre_phase1 storeAllNR"+str(sa_c)+" "+str(bn)+nl)
+            bn += (1 if b.subBases==[] else len(b.subBases))
+            sa_c+=1
+    if bn>1:
+        off.write("let storeAll_postNR=storeAllNR"+str(sa_c)+nl)
+    else:
+        if haveAll:
+            off.write("let storeAll_postNR=storeAll_pre_NR"+nl)
+
+    #as in static-phases, generate functions from the __NR2 calcs and apply to the s/a
+    #it is assumed that the calc formulae themselves have the ability to cope with bases/subbases
+    if bn>1:
+        revd = []
+        ph = mi.phases["phase1"]
+        for ci in ph.values():  # order is "just as it comes" (TODO make sure dict does not mess up the order)
+            if ci.isNonRebase and ci.isWholeArray:
+                revd = [ci.name] + revd
+                off.write(nl)
+                convCode(mi, ci, CALCCODE)  # write calc's code, this case a storeAll->storeAll fn
+        call = "storeAll_postNR"
+        for fn in revd:  # call of call of...
+            call = fn + "(" + call + ")"
+        off.write("\nlet storeAllPostNR2 = " + call + nl)
+    else:
+        if haveAll:
+            off.write("\nlet storeAllPostNR2 = storeAllPostNR\n")
+
+    #Run experience basis (phase1)- with rebasing
+    if mi.dataFieldInfos[mi.termField].expression=="":
+        termBit="(pol."+mi.termField+"-"+mi.phaseStart["phase1"]+")"
+    else:
+        termBit="(der."+mi.termField+"-"+mi.phaseStart["phase1"]+")"
+    if haveAll:
+        off.write("\nlet (as_post_phase1,storeAllPostphase1)=runExperience_"+mi.name+" init_as_pre_phase1 storeAllPostNR2 "+termBit+nl)
+    else:
+        off.write("\nlet as_post_phase1=runExperience_"+mi.name+" "+termBit+" init_as_pre_phase1 "+nl)
+
+    #remaining phases
+    phC=0
+    phSkip=1+(1 if hasPhase0 else 0)#number of phases already carried out
+    prevPhName="phase1"
+    for (phName, ph) in mi.phases.items():
+        phC+=1
+        if phC>phSkip:
+            off.write(nl)
+            if mi.phaseDirections[phName]=="static":#run eiher N periods or static-phase
+                off.write("let storeAllPost"+phName+"=runStaticPhase_"+mi.name+"_"+phName+" (storeAllPost"+prevPhName+")"+nl)
+                off.write("let as_post_"+phName+"=as_post_"+prevPhName+nl)#keep all-state the same
+            else:
+                if mi.phaseStart[phName]!="previousTime":
+                    strt=mi.phaseStart[phName]
+                else:
+                    strt="as_post_"+prevPhName+".t"
+                dummyCi=calcInfoObject()
+                dummyCi.name = ""
+                dummyCi.lhs = "phTerm="
+                dummyCi.initialisation = mi.phaseTerm[phName]
+                dummyCi.myPhase=phName
+                convCode(mi, dummyCi, DERIVED)
+                if haveAll:
+                    off.write("let (as_pre_"+phName+",storeAllPost"+prevPhName+"')=init_"+mi.name+"_"+phName+"_all as_post_"+prevPhName+(" scen " if hasESG else "")+" 0 storeAllPost"+prevPhName+nl)#initialisation from previous phase (all-state and store-all).
+                    off.write("let storeAllPre"+phName+"=init_"+mi.name+"_"+phName+"_storeAll 0 as_post_"+prevPhName+(" scen " if hasESG else "")+" storeAllPost"+prevPhName+"'"+nl)#initialisation from previous phase (all-state and store-all).
+                    off.write("let (as_post_"+phName+",storeAllPost"+phName+")=runNPeriods_" + mi.name +"_"+phName+" phTerm as_pre_"+phName+" storeAllPre"+phName + nl)#run phase
+                else:
+                    off.write("let as_pre_"+phName+"=init_"+mi.name+"_"+phName+"_all as_post_"+prevPhName+(" scen " if hasESG else "")+" 0 "+nl)#initialisation from previous phase (all-state and store-all).
+                    off.write("let as_post_"+phName+"=runNPeriods_" + mi.name +"_"+phName+" phTerm as_pre_"+phName+nl)#run phase
+            prevPhName=phName
+
+    #output from run one pol
+    off.write(nl)
+    results="["
+    for (phName, ph) in mi.phases.items():#get output calcs and assemble their 1-d (over time) arrays as a 2-d array
+        comma=""
+        for ci in ph.values():
+            if ci.isOutput:
+                if outputMode=="VECTOR":
+                    if not ci.isArrayed:
+                        results+=comma+"storeAllPost"+prevPhName+"[i_"+mi.name+"_"+ci.name+"]"
+                        comma = ","
+                    else:
+                        for i in range(0,ci.dimSizes[0]):
+                            results += comma + "storeAllPost" + prevPhName + "[i_" + mi.name + "_"+ci.name +"+"+ str(i)+"]"
+                            comma = ","
+                else:
+                    if not ci.isArrayed:
+                        for fld in ci.fieldsCalcd:
+                            results+=comma+"as_post_"+prevPhName+".state__1."+fld
+                            comma = ","
+                    else:
+                        for i in range(0,ci.dimSizes[0]):
+                            results += comma + "as_post_" + prevPhName + ".state__1."+ci.name+"["+str(i)+"]"
+                            comma = ","
+
+    results+="]"
+    off.write("in "+results+nl)
+
+    #run one policy on all scenarios, for stochastic
+    if isStochastic:
+        off.write("\nlet runOnePolAllScens_"+mi.name+" (scens:[]oneScen) (pol:data_"+mName+") (der:derived_"+mName+"):[]f32 ="+nl)
+        off.write("let allSimsResults:[][]f32=map (runOnePol_"+mi.name+" pol der) scens"+nl)
+        off.write("let sumSims = reduce (+.+) (zeros1 numOutputs) allSimsResults"+nl)
+        off.write("in map (/numScens) sumSims\n")
+
+    #batches of policies, if required
+    if mi.batchSizeInternal>0:
+        off.write("\nlet batchSize:i32="+str(mi.batchSizeInternal)+nl)
+        off.write("let numBatches=if numPols%%batchSize==0 then (numPols//batchSize) else (numPols//batchSize+1)\n")
+        off.write("let sumOfBatches=\n")
+        off.write("\tloop sumOfBatches':"+("[]" if outputMode=="VECTOR" else "")+"[][]f32=(zeros"+("3" if outputMode=="VECTOR" else "2")+" batchSize "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" for i<numBatches do\n")
+        off.write("\tlet lo=i*batchSize\n")
+        off.write("\tlet hi=mini ((i+1i32)*batchSize) numPols\n")
+        off.write("\tlet batchRes = map2 (runOnePol"+("AllScens" if isStochastic else "")+"_"+mName+(" scens"+("[0]"if not isStochastic else "")+")" if hasESG else ")")+" fileData_"+mName+"[lo:hi] derived_"+mName+"[lo:hi]\n")
+        off.write("\tin sumOfBatches' +."+("." if outputMode=="VECTOR" else "")+".+ batchRes\n")
+        off.write("in reduce (+."+("." if outputMode=="VECTOR" else "")+"+) (zeros"+("2" if outputMode=="VECTOR" else "1")+" "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" sumOfBatches\n")
+    else:
+        off.write(nl)
+        off.write("let res = map2 (runOnePol"+("AllScens" if isStochastic else "")+"_"+mName+(" scens"+("[0]"if not isStochastic else "")+")" if hasESG else ")")+" fileData_"+mName+" derived_"+mName+nl)
+        off.write("in reduce (+."+("." if outputMode=="VECTOR" else "")+"+) (zeros"+("2" if outputMode=="VECTOR" else "1")+" "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" res\n")
+
+#Dependent case - all the top model code - directly within main
+if isDependent:
+    topPhase=topModel.phases[list(topModel.phases.keys())[0]]#only 1 phase
+    del topModel.phases[list(topModel.phases.keys())[0]]#remove the actual single phase as it'll be replaced with pseudo-phases (between calls) so as to do the ordering
+    for mi in modelInfos.values():#create array of zeroised states and all-states for sub-models
+        off.write("zeros_as_"+mi.name+"=map"+("2 " if mi.hasDerived else " ")+"zero_as_"+mi.name+" fileData_"+mi.name+(" derived_"+mi.name if mi.hasDerived else "")+nl)
+
+    currPhase={}
+    pc=1
+    topModel.phaseDirections={}
+    dummyCi=calcInfoObject()
+    dummyCi.isCall=True
+    topPhase["ZZZZZ"]=dummyCi#dummy at end to ensure any cals at tne end are picked up
+    for (cin,ci) in topPhase.items():#get call info, inner-model call info  and create pseudo-phases
+        if not ci.isCall:#add calc to pseudo-phase
+            currPhase[ci.name]=ci
+        if ci.isCall:
+            if currPhase!={}:#got some calcs between calls, make a phase out of them
+                topModel.phases["phase"+str(pc)]=currPhase
+                topModel.phaseDirections["phase"+str(pc)]="forwards"
+                topModel.phaseStart["phase"+str(pc)]=""
+                topModel.phaseTerm["phase"+str(pc)]=""
+                pc+=1
+                currPhase={}
+            if cin=="ZZZZZ":
+                continue
+            call=callInfoObject()
+            call.name=ci.name
+            #a bit silly, but need to avoid = in conditional expression being used as a delimiter
+            l=ci.code[0]
+            l=l.replace("==","=@")
+            l=l.replace("<=","<@")
+            l=l.replace(">=",">@")
+            l=l.replace("!=","!@")
+            (ls, _, _) = nwscap(l, "=,")
+            skipItem=False
+            for i in range(0,len(ls)):
+                l=ls[i]
+                lu=l.upper()
+                if not skipItem:
+                    if not allowableCallSettings.__contains__(lu):
+                        doErr("Unknown store setting for call: ", l)
+                    if lu=="ZEROISE":
+                        call.zeroise = bool(ls[i+1])
+                    if lu == "INITIALSTATE":
+                        call.initialState = ls[i+1]
+                    if lu=="STATEINPUT":
+                        call.stateInput =  ls[i+1]
+                    if lu=="MODEL":
+                        call.model =  ls[i+1]
+                    if lu=="PHASE":
+                        call.phase =  ls[i+1]
+                    if lu=="INITIALISE":
+                        call.initalise =  bool(ls[i+1])
+                    if lu=="TERM":
+                        call.term = int( ls[i+1])
+                    if lu=="STOCHASTIC":
+                        call.isStochastic = bool( ls[i+1])
+                    if lu=="INNERSCENARIOS":
+                        call.innerScenarios =  ls[i+1]
+                    if lu=="BASIS":
+                        call.bases =  ls[i+1]
+                    if lu=="WHEN":
+                        ll=ls[i+1]#reverse the silly hack from above
+                        ll = ll.replace("@", "=")
+                        call.when =  ll
+                    if lu=="RETURNS":
+                        call.returns =  ls[i+1]
+                skipItem=not skipItem
+            callInfos[ci.name]=call
+        if ci.isInnerScenarios:
+            imco=innerModelCallObject()
+            imco.name=ci.name
+            l=l.replace("==","=@")
+            l=l.replace("<=","<@")
+            l=l.replace(">=",">@")
+            l=l.replace("!=","!@")
+            (ls, _, _) = nwscap(l, "=,")
+            skipItem=False
+            for i in range(0,len(ls)):
+                l=ls[i]
+                lu=l.upper()
+                if not skipItem:
+                    if inParams:
+                        ll=ls[i+1]
+                        ll=ll.replace("(","")
+                        ll=ll.replace(")","")
+                        imco.theParams=imco.theParams.__add__([ll])
+                        continue
+                    if not allowableInnerModelCallSettings.__contains__(lu):
+                        doErr("Unknown store setting for inner model call: ", l)
+                    if lu=="MODEL":
+                        imco.model=ls[i+1]
+                    if lu=="NUMSCENS":
+                        imco.numScens=int(ls[i+1])
+                    if lu == "TERM":
+                        imco.term = int(ls[i + 1])
+                    if lu=="BASIS":
+                        imco.basis=ls[i+1]
+                    if lu == "WHEN":
+                        ll = ls[i + 1]  # reverse the silly hack from above
+                        ll = ll.replace("@", "=")
+                        imco.when = ll
+                    if lu=="THEPARAMS":
+                        inParams=True
+                        continue
+                if not inParams:
+                    skipItem = not skipItem
+            innerModelCalls[ci.name]=imco
 
 off.close()
 
