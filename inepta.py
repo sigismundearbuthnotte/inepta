@@ -28,7 +28,7 @@ for i in range(1,100):
 allowableSections=set(["BASIC","ESG","DATA","DERIVED","PHASE","END","TABLES","COMMON","INNERESG"])
 allowableBasicParams=set(["NAME","ARRAYED","TERM","START","FORCE","FIRSTPROJECTIONPERIOD","LASTPROJECTIONPERIOD","BATCHSIZEEXTERNAL","BATCHSIZEINTERNAL","INNERMODEL"])
 calcSettings={"STORE":True,"TYPE":True,"__NR1":False,"__NR2":False,"__R1":False,"__R2":False,"OUTPUT":False,"OVERWRITES":True,"CONSTANT":False,"CALL":False,"INNERSCENARIOS":False}#does a further value follow the setting name?
-allowableCallSettings=set(["NAME","ZEROISE","INITIALSTATE","STATEINPUT","MODEL","PHASE","INITIALISE","TERM","STOCHASTIC","INNERSCENARIOS","BASIS","WHEN","RETURNS"])
+allowableCallSettings=set(["NAME","ZEROISE","INITIALSTATE","STATEINPUT","MODEL","PHASE","INITIALISE","TERM","STOCHASTIC","SCENARIOS","BASIS","WHEN","RETURNS"])
 allowableInnerModelCallSettings=set(["NAME","MODEL","NUMSCENS","TERM","BASIS","WHEN","THEPARAMS"])
 allowablecalcSettings=set(calcSettings.keys())
 allowablePhaseSettings=set(["NAME","DIRECTION","START","TERM"])
@@ -147,6 +147,7 @@ class callInfoObject:
         self.basis=""#basis name
         self.when=""#time expresssion
         self.returns="Both"#state, output, both e.g. not interested in final state(s) for an inner stochastic run
+        self.stores=False#True==(stores=1)
 
 class innerModelCallObject:
     def __init__(self):
@@ -488,6 +489,7 @@ numInnerScens=0
 firstRebasedBasis=0
 scensFile=""
 outputMode="VECTOR"
+stochasticSummaryFunctions=[]
 for l in ift.readlines():
     (ls,c,lsu)=nwscap(l,",=")
     if c:
@@ -500,7 +502,7 @@ for l in ift.readlines():
                 doErr("Unterminated section preceding ", ls[0])
             continue
         if section=="BASIC":
-            if lsu[0] not in set(["MODE","STOCHASTIC","NUMSCENARIOS","NUMINNERSCENARIOS","FILE","OUTPUT"]):
+            if lsu[0] not in set(["MODE","STOCHASTIC","NUMSCENARIOS","NUMINNERSCENARIOS","FILE","OUTPUT","STOCHASTICSUMMARYFUNCTIONS"]):
                 doErr("Unknown basic setting for top level model file: ",l)
             if lsu[0]=="MODE":
                 if lsu[1] not in set(["DEPENDENT","INDEPENDENT"]):
@@ -516,6 +518,8 @@ for l in ift.readlines():
                 scensFile = ls[1]
             if lsu[0]=="OUTPUT":
                 outputMode=lsu[1]
+            if lsu[0]=="STOCHASTICSUMMARYFUNCTIONS":
+                stochasticSummaryFunctions=[ll for ll in ls[1:]]
         if section=="SUBBASE":
             if lsu[0]=="NAME":
                 sbVals[ls[1]]=[]
@@ -993,6 +997,18 @@ for ph in mi.phases.values():
                 numOutputs+=ci.dimSizes[0]
 off.write("let numOutputs:i32="+str(numOutputs)+nl)
 
+#number of outputs for submodels - for stochastic
+for mi in modelInfos.values():
+    numOutputs2=0
+    for ph in mi.phases.values():
+        for ci in ph.values():
+            if ci.isOutput:
+                if not ci.isArrayed:
+                    numOutputs2+=1
+                else:
+                    numOutputs2+=ci.dimSizes[0]
+    off.write("let numOutputs_"+mi.name+":i32="+str(numOutputs2)+nl)
+
 #enums
 off.write(nl)
 for enum in enums.values():
@@ -1084,7 +1100,7 @@ for mi in modelInfos.values():
             comma = ","
         off.write("}\n")
 
-# various state types including containers for past values and the all-state.  This does apply to top.
+# various state types including containers for past values and the all-state.  This does apply to top, but top also needs state from calls (i.e.all-states from sub-model types)
 haveAll=False
 for mi in modelInfosPlus.values():
     maxStored = 0
@@ -1099,18 +1115,36 @@ for mi in modelInfosPlus.values():
     # main state, only needed for stored (incl. store-all to allow initialisation thereof) items
     off.write("\ntype state_" + mi.name + "={\n")
     comma = ""
+    anyField=False#in case there is no state (e.g. in the top model t=0 only)
     for ph in mi.phases.values():
         for ci in ph.values():
-            if ci.stores > 0 or (ci.isOutput and outputMode=="SCALAR") or ci.isConstant:
-                typ = "int"
-                if ci.type == "real":
-                    typ = "real"
-                brackets = ""
-                for i in range(0, ci.numDims):
-                    brackets = brackets + "[" + str(ci.dimSizes[i]) + "]"
-                for fld in ci.fieldsCalcd:
-                    off.write(comma + fld + ":" + brackets + typ + nl)
-                    comma = ","
+            if not ci.isCall:
+                if ci.stores > 0 or (ci.isOutput and outputMode=="SCALAR") or ci.isConstant:
+                    anyField=True
+                    typ = "int"
+                    if ci.type == "real":
+                        typ = "real"
+                    brackets = ""
+                    for i in range(0, ci.numDims):
+                        brackets = brackets + "[" + str(ci.dimSizes[i]) + "]"
+                    for fld in ci.fieldsCalcd:
+                        off.write(comma + fld + ":" + brackets + typ + nl)
+                        comma = ","
+            else:#it's a call
+                if ci.stores>0:
+                    anyField=True
+                    l = ci.code[0]#find submodel (bit of a hack, we will analyse calls properly later in the top-modelcode generation)
+                    if l.strip() == "":
+                        l = ci.code[1]
+                    (ls, _, _) = nwscap(l, "=,")
+                    for i in range(0, len(ls)):
+                        if ls[i].upper()=="MODEL":
+                            subModel=ls[i+1]
+                            break
+                    off.write(comma+ci.name+":[]state_"+subModel+"_all")
+                    comma=","
+    if not anyField:#add dummy field to prevent empty type
+        off.write("x__zog:f32")
     off.write("}\n")
 
     # loop through past states (>1), but not store-all
@@ -1264,6 +1298,16 @@ dummyCi.myPhase="phase0"
 #convert (outer) scenarios
 if hasESG:
     off.write("let scens=scensFromArrays scensData"+nl)
+    #cut down the outer scenarios so they have the same format as the inner (they are supposed to be a super-set of the inner scenarios, so essentially exclude params for inner model)
+    if isDependent:
+        off.write("let scenToInner (scen:oneScen):oneScenInner=\n")
+        off.write("{")
+        comma=""
+        for (k,v) in topModel.innerESG.items():
+            off.write(comma+k+"="+k+nl)
+            comma=","
+        off.write("}"+nl)
+        off.write("let scensAsInner=map scenToInner scens"+nl)
 
 #common code - i.e outside calcs - can really access only tables or call user-defined functions (there are no assumptions or checks about dependencies betwen models)
 for mi in modelInfosPlus.values():
@@ -1416,7 +1460,7 @@ for mi in modelInfos.values():
     for (phName,ph) in mi.phases.items():
         if mi.phaseDirections[phName]!="static":
             off.write(nl)
-            off.write("let  runOnePeriod_"+mi.name+"_"+phName+" (as:state_"+mi.name+"_all)"+(" (storeAll:*[][]f32):" if haveAll else ":"))
+            off.write("let  runOnePeriod_"+mi.name+"_"+phName+("" if not isDependent else " (asTop:state_top_all)  (scen:oneScenInner) ")+" (as:state_"+mi.name+"_all)"+(" (storeAll:*[][]f32):" if haveAll else ":"))
             if haveAll:
                 off.write(" (state_"+mi.name+"_all,*[][]f32)="+nl)
             else:
@@ -1509,14 +1553,28 @@ for mi in modelInfos.values():
         if mi.phaseDirections[phName]!="static":
             off.write(nl)
             if haveAll:
-                off.write("let  runNPeriods_"+mi.name+"_"+phName+" (n:i32) (as:state_"+mi.name+"_all) (storeAll:*[][]f32):")
+                off.write("let  runNPeriods_"+mi.name+"_"+phName+("" if not isDependent else " (asTop:state_top_all) (scen:oneScenInner) ")+" (n:i32) (as:state_"+mi.name+"_all) (storeAll:*[][]f32):")
                 off.write(" (state_" + mi.name + "_all,*[][]f32)=" + nl)
                 off.write("\tloop (as':state_"+mi.name+"_all,storeAll':*[][]f32)=\n")
                 off.write("\t(as,storeAll) for i<n do\n")
-                off.write("\trunOnePeriod_"+mi.name+"_"+phName+" as' storeAll'"+nl)
+                off.write("\trunOnePeriod_"+mi.name+"_"+phName+("" if not isDependent else " asTop scen")+" as' storeAll'"+nl)
             else:
-                off.write("let  runNPeriods_"+mi.name+"_"+phName+" (n:i32) (as:state_"+mi.name+"_all):state_"+mi.name+"_all="+nl)
-                off.write("\t(iterate n runOnePeriod_"+mi.name+"_"+phName+") as"+nl)
+                off.write("let  runNPeriods_"+mi.name+"_"+phName+("" if not isDependent else " (asTop:state_top_all)  (scen:oneScenInner)")+" (n:i32) (as:state_"+mi.name+"_all):state_"+mi.name+"_all="+nl)
+                off.write("\t(iterate n (runOnePeriod_"+mi.name+"_"+phName+("" if not isDependent else " asTop scen) ")+") as"+nl)
+
+#functions for inner stochastic run, one policy, TODO we would like outputs to be defined by the list of "stochastic summary functions" in the main-model file, but it's too hard: means only FTB.
+if isDependent:
+    for mi in modelInfos.values():
+        for (phName, ph) in mi.phases.items():
+            if mi.phaseDirections[phName] != "static":
+                off.write(nl)
+                if haveAll:
+                    pass
+                else:
+                    off.write("let runStochastic_"+mi.name+"_"+phName+ " (asTop:state_top_all) (scens:[]oneScenInner) (n:i32) (as:state_"+mi.name+"_all):[]f32="+nl)#returns mean value of output
+                    off.write("let allSimsResults:[][]f32=map (runNPeriodsWithOutput_"+mi.name+"_"+phName+" asTop n as) scens"+nl)#scen x item
+                    off.write("let sumSims = reduce (+.+) (zeros1 numOutputs_"+mi.name+") allSimsResults"+nl)
+                    off.write("in map (/(length scens)) sumSims"+nl)
 
 #functions to do NR runs: phase 1 runNPeriod.  The latter also stores the __NR1 calcs in the correct place in s/a (in the store function)
 if haveNR:
@@ -1608,19 +1666,24 @@ if not isDependent:
     else:
         initPhase="phase1"
 
-#create a zeroised state explicitly (this is so that all initialisation functions can have the same pattern of using "with"
+#create a zeroised state explicitly (this is so that all initialisation functions can have the same pattern of using "with").
 for mi in modelInfosPlus.values():
     off.write("\nlet zero_state_"+mi.name+":state_"+mi.name+"={"+nl)
     comma=""
     for (phName, ph) in mi.phases.items():
         for ci in ph.values():
-            if ci.stores > 0 or (ci.isOutput and outputMode=="SCALAR") or ci.isConstant:
-                for fld in ci.fieldsCalcd:
-                    if not ci.isArrayed:
-                        off.write(comma+fld+"=0\n")
-                    else:
-                        off.write(comma+fld+"=zeros"+("i" if ci.type=="int" else "")+str(ci.numDims)+" "+"".join([str(i)+" " for i in ci.dimSizes])+nl)
-                    comma = ","
+            if not ci.isCall:
+                if ci.stores > 0 or (ci.isOutput and outputMode=="SCALAR") or ci.isConstant:
+                    for fld in ci.fieldsCalcd:
+                        if not ci.isArrayed:
+                            off.write(comma+fld+"=0\n")
+                        else:
+                            off.write(comma+fld+"=zeros"+("i" if ci.type=="int" else "")+str(ci.numDims)+" "+"".join([str(i)+" " for i in ci.dimSizes])+nl)
+                        comma = ","
+            else:#a call, it's an array of something, so just make it empty
+                if ci.stores>0:
+                    off.write(comma+ci.name+"=[]")
+                    comma=","
     off.write("}\n")
 
     #create an all-state explicitly, this also involves explictly creating records for past values - for the dependent case this is a function
@@ -1803,32 +1866,37 @@ if isDependent:
     topPhase=topModel.phases[list(topModel.phases.keys())[0]]#only 1 phase
     del topModel.phases[list(topModel.phases.keys())[0]]#remove the actual single phase as it'll be replaced with pseudo-phases (between calls) so as to do the ordering
     for mi in modelInfos.values():#create array of zeroised states and all-states for sub-models
-        off.write("zeros_as_"+mi.name+"=map"+("2 " if mi.hasDerived else " ")+"zero_as_"+mi.name+" fileData_"+mi.name+(" derived_"+mi.name if mi.hasDerived else "")+nl)
+        off.write("let zeros_as_"+mi.name+"=map"+("2 " if mi.hasDerived else " ")+"zero_as_"+mi.name+" fileData_"+mi.name+(" derived_"+mi.name if mi.hasDerived else "")+nl)
 
     currPhase={}
     pc=1
     topModel.phaseDirections={}
     dummyCi=calcInfoObject()
     dummyCi.isCall=True
-    topPhase["ZZZZZ"]=dummyCi#dummy at end to ensure any cals at tne end are picked up
+    topPhase["ZZZZZ"]=dummyCi#dummy at end to ensure any calls at tne end are picked up
+    currPhaseName="phase1"
     for (cin,ci) in topPhase.items():#get call info, inner-model call info  and create pseudo-phases
         if not ci.isCall:#add calc to pseudo-phase
+            ci.myPhase=currPhaseName
             currPhase[ci.name]=ci
         if ci.isCall:
-            if currPhase!={}:#got some calcs between calls, make a phase out of them
-                topModel.phases["phase"+str(pc)]=currPhase
-                topModel.phaseDirections["phase"+str(pc)]="forwards"
-                topModel.phaseStart["phase"+str(pc)]=""
-                topModel.phaseTerm["phase"+str(pc)]=""
-                pc+=1
-                currPhase={}
+            topModel.phases[currPhaseName]=currPhase#got some calcs between calls, make a phase out of them.  Keep empty phases so we can simply loop: phase, call, phase...
+            topModel.phaseDirections[currPhaseName]="forwards"
+            topModel.phaseStart[currPhaseName]=""
+            topModel.phaseTerm[currPhaseName]=""
+            pc+=1
+            currPhase={}
+            currPhaseName="phase"+str(pc)
             if cin=="ZZZZZ":
                 continue
             call=callInfoObject()
             call.name=ci.name
+            call.stores=(ci.stores==1)
             #a bit silly, but need to avoid = in conditional expression being used as a delimiter
             l=ci.code[0]
-            l=l.replace("==","=@")
+            if l.strip()=="":
+                l=ci.code[1]
+            l=l.replace("==","@@")
             l=l.replace("<=","<@")
             l=l.replace(">=",">@")
             l=l.replace("!=","!@")
@@ -1841,7 +1909,7 @@ if isDependent:
                     if not allowableCallSettings.__contains__(lu):
                         doErr("Unknown store setting for call: ", l)
                     if lu=="ZEROISE":
-                        call.zeroise = bool(ls[i+1])
+                        call.zeroise = (False if ls[i+1].upper()=="FALSE" else True)
                     if lu == "INITIALSTATE":
                         call.initialState = ls[i+1]
                     if lu=="STATEINPUT":
@@ -1851,15 +1919,15 @@ if isDependent:
                     if lu=="PHASE":
                         call.phase =  ls[i+1]
                     if lu=="INITIALISE":
-                        call.initalise =  bool(ls[i+1])
+                        call.initalise =  (False if ls[i+1].upper()=="FALSE" else True)
                     if lu=="TERM":
-                        call.term = int( ls[i+1])
+                        call.term = ls[i+1]
                     if lu=="STOCHASTIC":
-                        call.isStochastic = bool( ls[i+1])
-                    if lu=="INNERSCENARIOS":
+                        call.isStochastic = (False if ls[i+1].upper()=="FALSE" else True)
+                    if lu=="SCENARIOS":
                         call.innerScenarios =  ls[i+1]
                     if lu=="BASIS":
-                        call.bases =  ls[i+1]
+                        call.basis =  ls[i+1]
                     if lu=="WHEN":
                         ll=ls[i+1]#reverse the silly hack from above
                         ll = ll.replace("@", "=")
@@ -1871,24 +1939,28 @@ if isDependent:
         if ci.isInnerScenarios:
             imco=innerModelCallObject()
             imco.name=ci.name
-            l=l.replace("==","=@")
+            l=ci.code[0]
+            if l.strip()=="":
+                l=ci.code[1]
+            l=l.replace("==","@@")
             l=l.replace("<=","<@")
             l=l.replace(">=",">@")
             l=l.replace("!=","!@")
             (ls, _, _) = nwscap(l, "=,")
             skipItem=False
+            inParams=False
             for i in range(0,len(ls)):
                 l=ls[i]
                 lu=l.upper()
                 if not skipItem:
                     if inParams:
-                        ll=ls[i+1]
+                        ll=ls[i]
                         ll=ll.replace("(","")
                         ll=ll.replace(")","")
                         imco.theParams=imco.theParams.__add__([ll])
                         continue
                     if not allowableInnerModelCallSettings.__contains__(lu):
-                        doErr("Unknown store setting for inner model call: ", l)
+                        doErr("Unknown setting for inner model call: ", l)
                     if lu=="MODEL":
                         imco.model=ls[i+1]
                     if lu=="NUMSCENS":
@@ -1907,7 +1979,109 @@ if isDependent:
                 if not inParams:
                     skipItem = not skipItem
             innerModelCalls[ci.name]=imco
+    #function to run 1 period of the top model.  NB "scenInner" is actually the inner form of the outer scen.  It is used to evolve the submodels in the outer scenario.
+    off.write("\nlet  runOnePeriod_top (scen:oneScen) (scenInner:oneScenInner) (as:state_top_all)"+(" (storeAll:*[][]f32):" if haveAll else ":"))
+    if haveAll:
+        off.write(" (state_top_all,*[][]f32)="+nl)
+    else:
+        off.write(" state_top_all="+nl)
+    off.write("let t=as.t\n")
+    doACall=False#call or phase?
+    theCalls=list(callInfos.values())
+    thePhases=list(topModel.phases.values())
+    i_call=0#positons in calls/phases
+    i_phase=0
+    doneSomething=True
+    tempASCount=0#incremented to produce unique names for anything really
+    anyCount=0
+    while doneSomething:#loop through pseudo-phases and calls, alternately (a phase might be empty if there are two adjacent calls)
+        doneSomething=False
+        if not doACall:
+            whoCallsWhom = {}
+            if i_phase>=len(thePhases):
+                continue
+            doneSomething=True
+            ph=thePhases[i_phase]
+            for ci in ph.values():
+                if ci.isConstant:
+                    continue
+                iCall = []
+                for ci2 in ph.values():
+                    if ci2.isConstant:
+                        continue
+                    found = False
+                    for fld in ci2.fieldsCalcd:
+                        for l in ci.code:
+                            for mtch in re.finditer("[\W]" + fld + "[\W]", " " + l + " "):
+                                found = True
+                    if found:
+                        iCall.append(ci2.name)
+                whoCallsWhom[ci.name] = iCall
+            while whoCallsWhom != {}:
+                for (caller, callees) in whoCallsWhom.items():
+                    if callees == []:
+                        convCode(topModel,ph[caller],CALCCODE)
+                        off.write(nl)
+                        for l in whoCallsWhom.values():
+                            if l.__contains__(caller):
+                                l.remove(caller)
+                        del whoCallsWhom[caller]
+                        break
+            doACall = True
+            i_phase+=1
+        else:# a call
+            if i_call>=len(theCalls):#finished all calls
+                continue
+            doneSomething=True
+            tempASCount+=1
+            off.write("let as"+str(tempASCount)+"=as")#temporary state incorporating top model calcs so far, to pass into call
+            if tempASCount>1:
+                off.write(str(tempASCount-1))
+            if i_phase>=1:#in case call right at start
+                for ci in thePhases[i_phase-1].values():#incorporate the changes in the last pseudo-phase
+                    if ci.stores>0:
+                        for fld in ci.fieldsCalcd:
+                            off.write(" with state__1."+fld+"="+fld)
+            off.write(nl)
+            call=theCalls[i_call]
+            anyCount+=1
+            off.write("let whenExpr:bool"+str(anyCount)+"="+call.when+nl)
+            stateInput=call.stateInput
+            if stateInput[-3:]=="__1":
+                stateInput="as.state__1."+stateInput[:-3]
+            off.write("let termExpr"+str(anyCount)+"=if whenExpr"+str(anyCount)+" then (map (.state__1."+call.term+") "+stateInput+") else []"+nl)#lambda to calculate term from a calc in the state
+            if not call.isStochastic:
+                off.write("let "+call.name+"_state=if whenExpr"+str(anyCount)+" ")
+                off.write("(map2 (runNPeriods_"+call.model+"_"+call.phase+" as"+str(tempASCount)+" scenInner) termExpr"+str(anyCount)+" "+stateInput+") else"+(" state__1."+call.name if call.stores else "[]")+nl)
+            else:
+                off.write("let "+call.name+"_output=if whenExpr"+str(anyCount)+" ")
+                off.write("(map2 (runStochastic_"+call.model+"_"+call.phase+" as"+str(tempASCount)+" "+call.innerScenarios+") "+" termExpr"+str(anyCount)+" "+stateInput+") else"+(" state__1."+call.name if call.stores else "[]")+nl)
+            doACall=False
+            i_call+=1
+    #storage function TODO: store-all
+    off.write("let store (as:state_top_all) "+("(storeAll:*[][]f32):" if haveAll else ":"))
+    if haveAll:
+        off.write(" (state_top_all,*[][]f32)=" + nl)
+    else:
+        off.write(" state_top_all=" + nl)
+    for i in range(topModel.maxStored ,0,-1):#stored states
+        off.write("let state__"+str(i)+"=as.state__"+str(i))
+        for ci in topPhase.values():
+            if ci.stores >= i or (i==1 and ci.isOutput and outputMode=="SCALAR"):
+                for fld in ci.fieldsCalcd:
+                    off.write(" with "+fld+"="+("as.state__"+str(i-1)+"." if i>1 else "")+fld+("_state" if ci.isCall else ""))
+        off.write(nl)
+    off.write("let asNew=as "+nl)#new all-state
+    for i in range(1, topModel.maxStored + 1):
+        off.write(" with state__"+str(i)+"=state__"+str(i))
+    off.write(" with t=as.t+1")
+    off.write(" with i_t=as.i_t+1"+nl)
+    off.write("in asNew" + nl)
+    off.write("in store as \n")  # return from runOnePeriod
 
+    #function to run N periods of the top model
+    #initialise state and all-state for top model
+    #call function to run N periods of the top model and get results
 off.close()
 
 #call Futhark .c file

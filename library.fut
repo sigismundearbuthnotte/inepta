@@ -187,3 +187,9 @@ let BSMNormInv(x:f64)=
         let r=f64.log(-f64.log r')
         in (c0+r*(c1+r*(c2+r*(c3+r*(c4+r*(c5+r*(c6+r*(c7+r*c8))))))))*(if y<0 then (-1) else 1)
     in ret
+
+--statistical
+let mean(x:[]f32):f32=(sum x)/(length X)
+let stdErr(x:[]32):f32=
+    mean( x *.* x) - (mean x)**2
+let stdErrAntithetic=stdErr--TODO
