@@ -16,6 +16,7 @@ futharkPath="/home/andrew/futhark-0.9.1-linux-x86_64/bin"
 targetLanguage="c"#"opencl"
 
 #constants
+maxRNsPerPeriod=10#for inner models TODO parameterise
 nl="\n"
 userDefinedFns={"real","exp","sqrt","log","sum","prod","zeros1","zeros2","zeros3","backDisc1","backDisc2","backDisc3","backDisc4","sumprod","sum1","sum2","cumprod","cumsum","udne", \
                 "interp","maxi","maxr","backDiscSingle1","backDiscSingle3","backDiscSingle2"}
@@ -40,6 +41,7 @@ INITIALISATION=1
 GLOBALFN=2
 DERIVED=3
 COMMON=4
+numMTItersPerBatchOfRNs=100#who knows?
 
 #subdirs
 rootSubDir=sys.argv[1]
@@ -489,7 +491,8 @@ numInnerScens=0
 firstRebasedBasis=0
 scensFile=""
 outputMode="VECTOR"
-stochasticSummaryFunctions=[]
+stochasticSummaryFunctions=[]#would be false e.g. for scr run, only applicable to dependent should always be true for independent stochastic
+averageOverScenarios=False
 for l in ift.readlines():
     (ls,c,lsu)=nwscap(l,",=")
     if c:
@@ -502,7 +505,7 @@ for l in ift.readlines():
                 doErr("Unterminated section preceding ", ls[0])
             continue
         if section=="BASIC":
-            if lsu[0] not in set(["MODE","STOCHASTIC","NUMSCENARIOS","NUMINNERSCENARIOS","FILE","OUTPUT","STOCHASTICSUMMARYFUNCTIONS"]):
+            if lsu[0] not in set(["MODE","STOCHASTIC","NUMSCENARIOS","NUMINNERSCENARIOS","FILE","OUTPUT","STOCHASTICSUMMARYFUNCTIONS","AVERAGEOVERSCENARIOS"]):
                 doErr("Unknown basic setting for top level model file: ",l)
             if lsu[0]=="MODE":
                 if lsu[1] not in set(["DEPENDENT","INDEPENDENT"]):
@@ -520,6 +523,8 @@ for l in ift.readlines():
                 outputMode=lsu[1]
             if lsu[0]=="STOCHASTICSUMMARYFUNCTIONS":
                 stochasticSummaryFunctions=[ll for ll in ls[1:]]
+            if lsu[0]=="AVERAGEOVERSCENARIOS":
+                averageOverScenarios= (False if lsu[1]=="FALSE" else True)
         if section=="SUBBASE":
             if lsu[0]=="NAME":
                 sbVals[ls[1]]=[]
@@ -613,13 +618,26 @@ ift=open(libSubDir+"/"+"library.fut",'r')
 for l in ift.readlines():
     off.write(l)
 ift.close()
+off.write("let numMTItersPerBatchOfRNs="+str(numMTItersPerBatchOfRNs)+nl)
 
-#inner ESG model code - added verbatim
+#inner ESG model code - added verbatim.  Also extract a function to return just the number of RNs per period.
+rnpp=""
+rnppAdd=False
 if isDependent and topModel.innerModel!="":
     ift = open(libSubDir + "/" + topModel.innerModel+".fut", 'r')
     for l in ift.readlines():
+        if l.__contains__("let "+topModel.innerModel+" "):#todo use regexp
+            innerModelSignature=l.replace(":[][][]f32",":i32").replace(topModel.innerModel,topModel.innerModel+"_RNsPerPeriod")
+            rnppAdd=True
+        else:
+            if rnppAdd:
+                if l.__contains__("let RNsPerPeriod"):
+                    l=l.replace("let RNsPerPeriod","").replace("="," in ")
+                    rnppAdd=False
+                rnpp+=l
         off.write(l)
     ift.close()
+off.write(nl+innerModelSignature+nl+rnpp+nl)
 
 def convUserFn(l):
     #repeatedly look for user defined functions and replace f(,,) with (f () () )
@@ -863,6 +881,8 @@ def convCode(mi,ci,codeType):#print converted code and return the expression to 
                     fpos = l.find(udf) + len(udf)
                     break
             l = l[:fpos] + " storeAll " + l[fpos:]
+        #reference to top model
+        l = re.sub("[\W]" + "top.",lambda x: x.group()[0] + "asTop.state__1.", l)#TODO only allows present (just before call to sub-model) values in top
         # references to other calcs
         for (phName2, ph2) in mi.phases.items():
             for ci2 in ph2.values():
@@ -1016,8 +1036,6 @@ for enum in enums.values():
         off.write("let "+k+":i32="+str(v)+nl)
 
 #other system constants
-off.write("let firstprojectionperiod:i32=("+str(mi.firstProjectionPeriod)+")"+nl)
-off.write("let lastprojectionperiod:i32=(" + str(mi.lastProjectionPeriod) + ")" + nl)
 off.write("let firstProjectionPeriod:i32=("+str(mi.firstProjectionPeriod)+")"+nl)
 off.write("let lastProjectionPeriod:i32=(" + str(mi.lastProjectionPeriod) + ")" + nl)
 off.write("let numPeriods:i32=lastProjectionPeriod-firstProjectionPeriod+1" + nl)
@@ -1141,7 +1159,7 @@ for mi in modelInfosPlus.values():
                         if ls[i].upper()=="MODEL":
                             subModel=ls[i+1]
                             break
-                    off.write(comma+ci.name+":[]state_"+subModel+"_all")
+                    off.write(comma+ci.name+":[]state_"+subModel+"_all"+nl)
                     comma=","
     if not anyField:#add dummy field to prevent empty type
         off.write("x__zog:f32")
@@ -1272,7 +1290,10 @@ for mi in modelInfos.values():#data files
 for mi in modelInfosPlus.values():#tables and their lower bounds (for (possibly) inner 2 dimensions)
     for t in mi.tableInfos.values():
         off.write(" (table_"+t.name+"_"+mi.name+":"+("[numBases]" if t.basis!="SINGLE" else "")+multiBracket[len(t.dims)]+"f32)"+(" (lb_"+t.name+"_"+mi.name+":[]i32)" if t.dim1HasLB or t.dim2HasLB else ""))
-off.write(":"+("[]" if outputMode=="VECTOR" else "")+"[]f32="+nl)
+if not isDependent:
+    off.write(":"+("[]" if outputMode=="VECTOR" else "")+"[]f32="+nl)#independent: item (x time) (always average of scens)
+else:
+    off.write(":"+("[]" if not averageOverScenarios else "")+"[]f32="+nl)#dependent: item (x scen, if not averaging) (output over time not allowed; however, could fake it using an arrayed calc)
 
 off.write("\nunsafe\n\n")
 
@@ -1562,7 +1583,32 @@ for mi in modelInfos.values():
                 off.write("let  runNPeriods_"+mi.name+"_"+phName+("" if not isDependent else " (asTop:state_top_all)  (scen:oneScenInner)")+" (n:i32) (as:state_"+mi.name+"_all):state_"+mi.name+"_all="+nl)
                 off.write("\t(iterate n (runOnePeriod_"+mi.name+"_"+phName+("" if not isDependent else " asTop scen) ")+") as"+nl)
 
-#functions for inner stochastic run, one policy, TODO we would like outputs to be defined by the list of "stochastic summary functions" in the main-model file, but it's too hard: means only FTB.
+#functions to run N periods one policy, ONE scenario, get outputs.  Destined for use in inner stochastic runs.
+if isDependent:
+    for mi in modelInfos.values():
+        for (phName,ph) in mi.phases.items():
+            if mi.phaseDirections[phName]!="static":
+                off.write(nl)
+                if haveAll:
+                    pass
+                else:
+                    off.write("let  runNPeriodsWithOutput_"+mi.name+"_"+phName+" (asTop:state_top_all)  (n:i32) (as:state_"+mi.name+"_all) (scen:oneScenInner):[]f32"+nl)
+                    off.write("\tlet asNew=(iterate n (runOnePeriod_"+mi.name+"_"+phName+" asTop scen)  as in"+nl)
+                    off.write("\t[")
+                    comma=""
+                    for ci in ph.values():
+                        if ci.isOutput:
+                            if not ci.isArrayed:
+                                for fld in ci.fieldsCalcd:
+                                    off.write(comma + "asNew.state__1." + fld)
+                                    comma = ","
+                            else:
+                                for i in range(0, ci.dimSizes[0]):
+                                    off.write(comma + "asNew.state__1." + ci.name + "[" + str(i) + "]")
+                                    comma = ","
+                    off.write("]"+nl)
+
+#functions for inner stochastic run, one policy all scenarios. TODO we would like outputs to be defined by the list of "stochastic summary functions" in the main-model file, but it's too hard: means only FTB.
 if isDependent:
     for mi in modelInfos.values():
         for (phName, ph) in mi.phases.items():
@@ -1680,9 +1726,17 @@ for mi in modelInfosPlus.values():
                         else:
                             off.write(comma+fld+"=zeros"+("i" if ci.type=="int" else "")+str(ci.numDims)+" "+"".join([str(i)+" " for i in ci.dimSizes])+nl)
                         comma = ","
-            else:#a call, it's an array of something, so just make it empty
+            else:#a call, it's an array of something, it'll need to be initialised so make it a replication of the zeroised submodel state
                 if ci.stores>0:
-                    off.write(comma+ci.name+"=[]")
+                    l = ci.code[0]#find submodel (bit of a hack (again!), we will analyse calls properly later in the top-modelcode generation)
+                    if l.strip() == "":
+                        l = ci.code[1]
+                    (ls, _, _) = nwscap(l, "=,")
+                    for i in range(0, len(ls)):
+                        if ls[i].upper()=="MODEL":
+                            subModel=ls[i+1]
+                            break
+                    off.write(comma+ci.name+"=zeros_as_"+subModel)
                     comma=","
     off.write("}\n")
 
@@ -1712,6 +1766,9 @@ for mi in modelInfosPlus.values():
     off.write("forceTheIssue=0")
     off.write("}\n")
     off.write(nl)
+
+    if isDependent:
+        off.write("let zeros_as_"+mi.name+"=map"+("2 " if mi.hasDerived else " ")+"zero_as_"+mi.name+" fileData_"+mi.name+(" derived_"+mi.name if mi.hasDerived else "")+nl)#create array of zeroised states and all-states for sub-models
 
 #all the special stuff for the independent case
 if not isDependent:
@@ -1863,18 +1920,19 @@ if not isDependent:
 
 #Dependent case - all the top model code - directly within main
 if isDependent:
-    topPhase=topModel.phases[list(topModel.phases.keys())[0]]#only 1 phase
-    del topModel.phases[list(topModel.phases.keys())[0]]#remove the actual single phase as it'll be replaced with pseudo-phases (between calls) so as to do the ordering
-    for mi in modelInfos.values():#create array of zeroised states and all-states for sub-models
-        off.write("let zeros_as_"+mi.name+"=map"+("2 " if mi.hasDerived else " ")+"zero_as_"+mi.name+" fileData_"+mi.name+(" derived_"+mi.name if mi.hasDerived else "")+nl)
+    topPhaseName=list(topModel.phases.keys())[0]
+    topPhase=topModel.phases[topPhaseName]#only 1 phase
+    del topModel.phases[topPhaseName]#remove the actual single phase as it'll be replaced with pseudo-phases (between calls) so as to do the ordering
 
     currPhase={}
     pc=1
     topModel.phaseDirections={}
+    topModel.phaseDirections[topPhaseName]="forwards"
     dummyCi=calcInfoObject()
     dummyCi.isCall=True
     topPhase["ZZZZZ"]=dummyCi#dummy at end to ensure any calls at tne end are picked up
     currPhaseName="phase1"
+    maxNumInnerScenarios=0
     for (cin,ci) in topPhase.items():#get call info, inner-model call info  and create pseudo-phases
         if not ci.isCall:#add calc to pseudo-phase
             ci.myPhase=currPhaseName
@@ -1931,7 +1989,7 @@ if isDependent:
                     if lu=="WHEN":
                         ll=ls[i+1]#reverse the silly hack from above
                         ll = ll.replace("@", "=")
-                        call.when =  ll
+                        call.when =  (ll if ll!="all" else "true")
                     if lu=="RETURNS":
                         call.returns =  ls[i+1]
                 skipItem=not skipItem
@@ -1965,20 +2023,36 @@ if isDependent:
                         imco.model=ls[i+1]
                     if lu=="NUMSCENS":
                         imco.numScens=int(ls[i+1])
+                        if imco.numScens>maxNumInnerScenarios:
+                            maxNumInnerScenarios=imco.numScens
                     if lu == "TERM":
-                        imco.term = int(ls[i + 1])
+                        imco.term = ls[i + 1]
                     if lu=="BASIS":
                         imco.basis=ls[i+1]
                     if lu == "WHEN":
                         ll = ls[i + 1]  # reverse the silly hack from above
                         ll = ll.replace("@", "=")
-                        imco.when = ll
+                        imco.when = (ll if ll!="all" else "true")
                     if lu=="THEPARAMS":
                         inParams=True
                         continue
                 if not inParams:
                     skipItem = not skipItem
             innerModelCalls[ci.name]=imco
+
+    #generate a single (large) set of Normals for use in inner runs
+    off.write("\nlet maxNumRNs:i32="+topModel.phaseTerm[topPhaseName]+"*"+str(maxRNsPerPeriod)+"*"+str(maxNumInnerScenarios)+nl)#numberof RNs to pre-generate
+    off.write("let numBlocksOf624:i32=1+maxNumRNs//(624*numMTItersPerBatchOfRNs)"+nl)
+    off.write("let RNsPerIteration:i32=numBlocksOf624*624"+nl)
+    off.write("let seeds:[]u32=5984...(5984+(u32.i32 numBlocksOf624-1))"+nl)
+    off.write("let initStatesOf624:[][]u32=map initMT seeds"+nl)
+    off.write("let U_inner':*[][]f32=replicate numMTItersPerBatchOfRNs (replicate RNsPerIteration 0f32)"+nl)#zeroise in-place array to fill with RNs
+    off.write("let (U_inner'':*[][]f32,_)=loop (u':*[][]f32,st':[][]u32)=(U_inner',initStatesOf624) for i<numMTItersPerBatchOfRNs do" + nl)
+    off.write("\tlet (st'',u'')=unzip (map nextBlockOf624 st')"+nl)
+    off.write("\tlet u'''=map BSMNormInv (map f32.f64 (flatten u''))"+nl)
+    off.write("\t in (u' with [i]=u''',st'')"+nl)
+    off.write("let inner_RNs:[][]f32=copy U_inner''"+nl)
+
     #function to run 1 period of the top model.  NB "scenInner" is actually the inner form of the outer scen.  It is used to evolve the submodels in the outer scenario.
     off.write("\nlet  runOnePeriod_top (scen:oneScen) (scenInner:oneScenInner) (as:state_top_all)"+(" (storeAll:*[][]f32):" if haveAll else ":"))
     if haveAll:
@@ -2020,7 +2094,25 @@ if isDependent:
             while whoCallsWhom != {}:
                 for (caller, callees) in whoCallsWhom.items():
                     if callees == []:
-                        convCode(topModel,ph[caller],CALCCODE)
+                        if not ph[caller].isInnerScenarios:
+                            convCode(topModel,ph[caller],CALCCODE)#calc
+                        else:#inner model call
+                            #get uniforms
+                            imco=innerModelCalls[caller]#call to inner model to generate inner scenarios
+                            anyCount += 1
+                            off.write("let whenExpr"+str(anyCount)+":bool=" + imco.when + nl)
+                            dummyCi=calcInfoObject()
+                            dummyCi.myPhase=topPhaseName
+                            ii=-1
+                            for parm in imco.theParams:#convert parameter expressions
+                                ii+=1
+                                dummyCi.code = [parm]
+                                dummyCi.lhs = imco.name+"_"+str(ii)+"="
+                                convCode(topModel, dummyCi, CALCCODE)
+                            imcoParams=" ("+",".join([imco.name+"_"+str(ii) for ii in range(0,len(imco.theParams))])+") "#tuple of params
+                            off.write("let "+imco.name+"_RNsPerPeriod=if whenExpr"+str(anyCount)+" then "+imco.model+"_RNsPerPeriod "+str(imco.numScens)+" "+imco.term+imcoParams+" [] else 0"+nl)#get number of RNs per period
+                            off.write("let RNs_"+imco.name+"=innerRNs[0:"+str(imco.numScens)+"*"+imco.term+"*"+imco.name+"_RNsPerPeriod"+"]"+nl)
+                            off.write("let "+imco.name+"=if whenExpr"+str(anyCount)+" then "+imco.model+" "+str(imco.numScens)+" "+imco.term+imcoParams+" RNs_"+imco.name+" else []")#call inner model
                         off.write(nl)
                         for l in whoCallsWhom.values():
                             if l.__contains__(caller):
@@ -2045,7 +2137,7 @@ if isDependent:
             off.write(nl)
             call=theCalls[i_call]
             anyCount+=1
-            off.write("let whenExpr:bool"+str(anyCount)+"="+call.when+nl)
+            off.write("let whenExpr"+str(anyCount)+":bool="+call.when+nl)
             stateInput=call.stateInput
             if stateInput[-3:]=="__1":
                 stateInput="as.state__1."+stateInput[:-3]
@@ -2079,9 +2171,63 @@ if isDependent:
     off.write("in asNew" + nl)
     off.write("in store as \n")  # return from runOnePeriod
 
-    #function to run N periods of the top model
-    #initialise state and all-state for top model
-    #call function to run N periods of the top model and get results
+    #function to initialise top (and submodels)
+    off.write(nl)
+    off.write("init_top (s:state_top) (scen:OneScen):state_top="+nl)
+    comma=""
+    inited=set()
+    for (cin,ci) in topPhase.items():
+        if cin=="ZZZZZ":
+            continue
+        if not ci.isCall:#not call, ordinary initialisation code
+            if ci.stores > 0 and ci.initialisation != "":
+                convCode(topModel, ci, INITIALISATION)
+                for fld in ci.fieldsCalcd:  # record which calcs were initialised (used with "with" in state creation)
+                    inited.add(fld)
+            if ci.isConstant:
+                convCode(mi, ci, CALCCODE)
+                for fld in ci.fieldsCalcd:
+                    inited.add(fld)
+        else:#call, call the appropriate submodel phase initialisation
+            call=callInfos[ci.name]
+            if call.stores:
+                off.write(call.name+"=map ((\\a b c:->init_"+call.model+"_"+call.phase+"_all c a b) scen 0) s."+call.name+nl)
+                inited.add(call.name)
+    if len(inited) != 0:#withs...
+        off.write("\nin s ")
+        for ci in inited:
+            off.write(" with " + ci + "=" + ci)
+        off.write(nl)
+    else:#no initialisation
+        off.write(" s " + nl)
+
+    #function to run N periods of the top model and get output (initialise state and all-state for top model first)
+    off.write(nl)
+    off.write("runNPeriodsWithOutput_top (n:i32) (scen:oneScen) (scenInner:oneScenInner) :[]f32="+nl)
+    off.write("\tlet init_as=zero_as_top with state__1=init_top zero_as_top.state__1 scen"+nl)#initialise top model state (both for calcs and for sub-models that are stored)
+    off.write("\tlet asNew=iterate n (runOnePeriod_top scen scenInner) init_as in"+nl)
+    off.write("[")
+    comma=""
+    for ci in topPhase.values():
+        if ci.isOutput:
+            if not ci.isArrayed:
+                for fld in ci.fieldsCalcd:
+                    off.write(comma + "asNew.state__1." + fld)
+                    comma = ","
+            else:
+                for i in range(0, ci.dimSizes[0]):
+                    off.write(comma + "asNew.state__1." + ci.name + "[" + str(i) + "]")
+                    comma = ","
+    off.write("]" + nl)
+
+    #results from main (dependent)
+    off.write(nl)
+    off.write("let allSimsResults:[][]f32=map2 (runNPeriodsWithOutput_top "+topModel.phaseTerm[topPhaseName]+") scens scensAsInner"+nl)
+    if averageOverScenarios:
+        off.write("let sumSims = reduce (+.+) (zeros1 numOutputs) allSimsResults"+nl)
+        off.write("in map (/(length scens)) sumSims"+nl)
+    else:
+        off.write("in allSimsResults"+nl)
 off.close()
 
 #call Futhark .c file

@@ -132,8 +132,6 @@ let initMT(s:u32):[N]u32=
     let ret:*[N]u32=[s]++(replicate (N-1) 0u32)
 in loop ret':*[N]u32=ret for i<(N-1) do ret' with [i+1]=1812433253u32*(ret'[i]^(ret'[i]>>30))+(u32.i32 i)+1u32
 
-let initStatesOf624(seeds:[]u32):[][]u32=map initMT seeds
-
 --return next states and RNs
 let nextBlockOf624 (b:[]u32):([]u32,[]f64)=
     let y =map2 (|) (map (&UPPER_MASK) b[0:N-M]) (map (&LOWER_MASK) b[1:N-M+1])
