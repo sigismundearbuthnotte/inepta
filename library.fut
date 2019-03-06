@@ -39,6 +39,7 @@ let undef2 (s1:i32) (s2:i32) :[][]f32=
 --scalar + vector
 let (*.) (x:f32) (y:[]f32) = map (x*) y
 let (+.) (x:f32) (y:[]f32) = map (x+) y
+let (-.) (x:f32) (y:[]f32) = map (x-) y
 
 --scalar + matrix
 let (*..) (x:f32) (y:[][]f32) = map (map (x*)) y
@@ -57,6 +58,9 @@ let (*..*) (x:[][]f32) (y:[][]f32) = map2 (map2 (*)) x y
 
 --two 3d arrays
 let (+...+) (x:[][][]f32) (y:[][][]f32) = map2 (map2 (map2 (+))) x y
+
+--linear algebra
+let multMatVec(m:[][]f32)(v:[]f32):[]f32=map (sumprod v) m
 
 --Back-recursive reserves; cflow assumed at start month, v is monthly, so we do not use the 1st v
 let backDisc1 (v:[]f32) (PVs:*[]f32) (cflow:[]f32):*[]f32= -- deprecated, does one array at at time - inefficent

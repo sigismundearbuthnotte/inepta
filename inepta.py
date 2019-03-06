@@ -29,7 +29,7 @@ for i in range(1,100):
 allowableSections=set(["BASIC","ESG","DATA","DERIVED","PHASE","END","TABLES","COMMON","INNERESG"])
 allowableBasicParams=set(["NAME","ARRAYED","TERM","START","FORCE","FIRSTPROJECTIONPERIOD","LASTPROJECTIONPERIOD","BATCHSIZEEXTERNAL","BATCHSIZEINTERNAL","INNERMODEL"])
 calcSettings={"STORE":True,"TYPE":True,"__NR1":False,"__NR2":False,"__R1":False,"__R2":False,"OUTPUT":False,"OVERWRITES":True,"CONSTANT":False,"CALL":False,"INNERSCENARIOS":False}#does a further value follow the setting name?
-allowableCallSettings=set(["NAME","ZEROISE","INITIALSTATE","STATEINPUT","MODEL","PHASE","INITIALISE","TERM","STOCHASTIC","SCENARIOS","BASIS","WHEN","RETURNS"])
+allowableCallSettings=set(["NAME","STATEINPUT","MODEL","PHASE","TERM","STOCHASTIC","SCENARIOS","BASIS","WHEN","RETURNS"])
 allowableInnerModelCallSettings=set(["NAME","MODEL","NUMSCENS","TERM","BASIS","WHEN","THEPARAMS"])
 allowablecalcSettings=set(calcSettings.keys())
 allowablePhaseSettings=set(["NAME","DIRECTION","START","TERM"])
@@ -137,12 +137,9 @@ class basisInfoObject:#might be OTT
 class callInfoObject:
     def __init__(self):
         self.name=""
-        self.zeroise=False#start from the zeroised state
-        self.initialState=""#name of call to use for the first time in a loop
         self.stateInput=""#input call-state to call (of this submodel) (NB the only other input will be the top models current state)
         self.model=None
         self.phase=None
-        self.initalise=False#whether or not to call initialise for the phase
         self.term=0
         self.isStochastic=False
         self.innerScenarios=""#name of inner senarios call
@@ -775,8 +772,9 @@ def subStoreAll(mtch,l,ci,mi,isCalcInThisPhase):#return substituted code for a r
     return (arrExp,endPos)
 
 #convert line of code - used in both code, initialisation and settting derived, does not apply to NR or R whole-array calcs
-def convCode(mi,ci,codeType):#print converted code and return the expression to call to get the value - this could be a function call for an arrayed calc
+def convCode(mi,ci,codeType,theCalls=[]):#print converted code and return the expression to call to get the value - this could be a function call for an arrayed calc
     #get code depending on what we are converting
+    tempVarCount=0
     phName=ci.myPhase
     if codeType==INITIALISATION or codeType==DERIVED:
         pos = ci.initialisation.find("=")
@@ -814,6 +812,89 @@ def convCode(mi,ci,codeType):#print converted code and return the expression to 
             l = l.replace("return ", "\tin ")
         else:
             l = l.replace("return ", "")
+        l = re.sub("[\W]" + "Me__" + "[\W]",lambda x: x.group()[0] + "as.p.Me__" + x.group()[5:], l)
+        haveTempVars=False
+        if mi.name=="top" and theCalls!=[]:#replace calls to submodel calls with temporary variables. Options: Filtered/Unfiltered Stochastic(output)/Non(state).  Former is much harder: needs zipping with the input state in order to do filtering.
+            doCalls=True
+            while doCalls:#loop until no further cases found
+                doCalls=False
+                for call in theCalls:
+                    itern = re.finditer("[\W]" + call.name +".", l)#find <call>.
+                    for x in itern:
+                        doCalls=True
+                        haveTempVars=True
+                        tempVarCount+=1
+                        filter=""
+                        pos= x.end()
+                        fld=""
+                        sPos=x.start()
+                        while pos<=len(l)-1 and l[pos].isalnum():#build up field name
+                            fld+=l[pos]
+                            pos+=1
+                        ePos=pos-1
+                        if pos<=len(l)-1:
+                            if l[pos]=="[":
+                                pos+=1
+                                brLevel=1
+                                while True:
+                                     if l[pos]=="[":
+                                        brLevel+=1
+                                     if l[pos]=="]":
+                                        brLevel-=1
+                                     if brLevel==0:
+                                        ePos=pos
+                                        break
+                                     else:
+                                         filter += l[pos]
+                                         pos += 1
+                        tempAssign = "let tempVar" + str(tempVarCount) + "="
+                        if filter!="":
+                            extraDotOne=""
+                            if call.isStochastic:
+                                extraDotOne=".1"
+                            convertedFilter=" "+filter+" "
+                            mi2=modelInfos[call.model]
+                            for ph2 in mi2.phases.values():
+                                for ci2 in ph2.values():
+                                    for fld2 in ci2.fieldsCalcd:
+                                        convertedFilter = re.sub("[\W]" + fld2 + "[\W]",lambda x: x.group()[0] + extraDotOne+".state__1." + fld2 + x.group()[len(fld2) + 1:], convertedFilter)
+                            for df in mi2.dataFieldInfos.values():  # add as.p. (or d.) in front of data/derived fields
+                                if df.expression == "":
+                                    convertedFilter = re.sub("[\W]" + df.name + "[\W]",lambda x: x.group()[0] + extraDotOne + ".p." + df.name + x.group()[len(df.name) + 1:], convertedFilter)
+                                else:
+                                    convertedFilter = re.sub("[\W]" + df.name + "[\W]",lambda x: x.group()[0] + extraDotOne + ".der." + df.name + x.group()[len(df.name) + 1:], convertedFilter)
+                        if call.isStochastic:
+                            oputPosn=0
+                            mi2 = modelInfos[call.model]
+                            for ph2 in mi2.phases.values():
+                                for ci2 in ph2.values():
+                                    if ci2.isOutput:
+                                        for fld2 in ci2.fieldsCalcd:
+                                            if fld2==fld:
+                                                break
+                                            else:
+                                                oputPosn+1
+                            if filter=="":
+                                tempAssign+="sum "+call.name+"[:"+str(oputPosn)+"]"
+                            else:
+                                tempAssign +="sum (((unzip (filter ("+convertedFilter+")"+" (zip "+call.stateInput+" "+call.name+"))).2)[:"+str(oputPosn)+"])"
+                        else:
+                            if not topModel.dataFieldInfos.__contains__(fld):
+                                fldPrefix="state__1."
+                            else:
+                                if topModel.dataFieldInfos[fld].expression!="":
+                                    fldPrefix="der."
+                                else:
+                                    fldPrefix="p."
+                            if filter=="":
+                                tempAssign+="sum (map (."+fldPrefix+fld+")"+call.name+")"
+                            else:
+                                tempAssign +="sum (map (."+fldPrefix+fld+") (filter ("+convertedFilter+")"+call.name+"))"
+                        off.write(tempAssign+nl)
+                        l=l[:sPos+1]+"tempVar" + str(tempVarCount)+l[ePos+1:]
+                        break#only do one occurence as changing the string
+                    if doCalls:
+                        break#as doing only 1 occurence
         for kt in mi.tableInfos.keys():  # convert table name to name of parameter of main
             l = re.sub("[\W]" + kt + "[\W]",lambda x: x.group()[0] + "table_" + kt + "_" + mi.name + x.group()[len(kt) + 1:], l)
         for (kt,vt) in mi.tableInfos.items():  # add basis index, if required
@@ -882,7 +963,7 @@ def convCode(mi,ci,codeType):#print converted code and return the expression to 
                     break
             l = l[:fpos] + " storeAll " + l[fpos:]
         #reference to top model
-        l = re.sub("[\W]" + "top.",lambda x: x.group()[0] + "asTop.state__1.", l)#TODO only allows present (just before call to sub-model) values in top
+        l = re.sub("[\W]" + "top.",lambda x: x.group()[0] + "asTop.state__1.", l)#TODO only allows present (just before call to sub-model) values in top.  Also, ignores possibility of top and submodel calcs having the same names
         # references to other calcs
         for (phName2, ph2) in mi.phases.items():
             for ci2 in ph2.values():
@@ -972,6 +1053,8 @@ def convCode(mi,ci,codeType):#print converted code and return the expression to 
                                 empty=False
                                 break#next iter as string changed
         l.replace("][",",")#any left over ][ from multi-d arrays (but not tables).  Come to think of it, does it make any difference in Futhark?  It does as you need e.g. (x[0])[1]
+        if haveTempVars and len(code)==1:
+            off.write(" in ")
         off.write(l+nl)
     if ci.isArrayed and mi.phaseDirections[phName] != "static":#multi-level mappings for arrayed
         for ind in range(1, ci.numDims):  # loop over map functions
@@ -1045,7 +1128,7 @@ numPeriods=mi.lastProjectionPeriod-mi.firstProjectionPeriod+1
 #data-record types (does not apply to top)
 off.write(nl)
 for mi in modelInfos.values():
-    off.write("type data_"+mi.name+"={"+nl)
+    off.write("type data_"+mi.name+"={"+nl+"Me__:int,"+nl)
     comma=""
     for df in mi.dataFieldInfos.values():
         if df.expression!="":
@@ -1097,7 +1180,7 @@ for mi in modelInfos.values():
                     comma=","
                 dataFieldsReal += "],"
     dataFieldsReal=dataFieldsReal[0:len(dataFieldsReal)-1]
-    off.write("map2 (\\x y :data_"+mi.name+"->{"+dataFieldsInt+dataFieldsReal+"}) dataInt dataReal"+nl)
+    off.write("map3 (\\x y i:data_"+mi.name+"->{"+dataFieldsInt+dataFieldsReal+",Me__=i}) dataInt dataReal (iota nr)"+nl)
 
 #derived types (does not apply to top)
 off.write(nl)
@@ -1966,18 +2049,12 @@ if isDependent:
                 if not skipItem:
                     if not allowableCallSettings.__contains__(lu):
                         doErr("Unknown store setting for call: ", l)
-                    if lu=="ZEROISE":
-                        call.zeroise = (False if ls[i+1].upper()=="FALSE" else True)
-                    if lu == "INITIALSTATE":
-                        call.initialState = ls[i+1]
                     if lu=="STATEINPUT":
                         call.stateInput =  ls[i+1]
                     if lu=="MODEL":
                         call.model =  ls[i+1]
                     if lu=="PHASE":
                         call.phase =  ls[i+1]
-                    if lu=="INITIALISE":
-                        call.initalise =  (False if ls[i+1].upper()=="FALSE" else True)
                     if lu=="TERM":
                         call.term = ls[i+1]
                     if lu=="STOCHASTIC":
@@ -2041,7 +2118,7 @@ if isDependent:
             innerModelCalls[ci.name]=imco
 
     #generate a single (large) set of Normals for use in inner runs
-    off.write("\nlet maxNumRNs:i32="+topModel.phaseTerm[topPhaseName]+"*"+str(maxRNsPerPeriod)+"*"+str(maxNumInnerScenarios)+nl)#numberof RNs to pre-generate
+    off.write("\nlet maxNumRNs:i32="+topModel.phaseTerm[topPhaseName]+"*"+str(maxRNsPerPeriod)+"*"+str(maxNumInnerScenarios)+"//2"+nl)#numberof RNs to pre-generate, only half as we'll negate so as to generate anithetes as we run (extra calcs, less memory)
     off.write("let numBlocksOf624:i32=1+maxNumRNs//(624*numMTItersPerBatchOfRNs)"+nl)
     off.write("let RNsPerIteration:i32=numBlocksOf624*624"+nl)
     off.write("let seeds:[]u32=5984...(5984+(u32.i32 numBlocksOf624-1))"+nl)
@@ -2051,7 +2128,7 @@ if isDependent:
     off.write("\tlet (st'',u'')=unzip (map nextBlockOf624 st')"+nl)
     off.write("\tlet u'''=map BSMNormInv (map f32.f64 (flatten u''))"+nl)
     off.write("\t in (u' with [i]=u''',st'')"+nl)
-    off.write("let inner_RNs:[][]f32=copy U_inner''"+nl)
+    off.write("let innerRNs:[][]f32=flatten (copy U_inner'')"+nl)
 
     #function to run 1 period of the top model.  NB "scenInner" is actually the inner form of the outer scen.  It is used to evolve the submodels in the outer scenario.
     off.write("\nlet  runOnePeriod_top (scen:oneScen) (scenInner:oneScenInner) (as:state_top_all)"+(" (storeAll:*[][]f32):" if haveAll else ":"))
@@ -2095,7 +2172,7 @@ if isDependent:
                 for (caller, callees) in whoCallsWhom.items():
                     if callees == []:
                         if not ph[caller].isInnerScenarios:
-                            convCode(topModel,ph[caller],CALCCODE)#calc
+                            convCode(topModel,ph[caller],CALCCODE,theCalls)#calc, NB: pass in details of calls so references to submodels can be converted
                         else:#inner model call
                             #get uniforms
                             imco=innerModelCalls[caller]#call to inner model to generate inner scenarios
@@ -2111,7 +2188,7 @@ if isDependent:
                                 convCode(topModel, dummyCi, CALCCODE)
                             imcoParams=" ("+",".join([imco.name+"_"+str(ii) for ii in range(0,len(imco.theParams))])+") "#tuple of params
                             off.write("let "+imco.name+"_RNsPerPeriod=if whenExpr"+str(anyCount)+" then "+imco.model+"_RNsPerPeriod "+str(imco.numScens)+" "+imco.term+imcoParams+" [] else 0"+nl)#get number of RNs per period
-                            off.write("let RNs_"+imco.name+"=innerRNs[0:"+str(imco.numScens)+"*"+imco.term+"*"+imco.name+"_RNsPerPeriod"+"]"+nl)
+                            off.write("let RNs_"+imco.name+"=innerRNs[0:"+str(imco.numScens)+"*"+imco.term+"*"+imco.name+"_RNsPerPeriod"+"//2]"+nl)#the inner model will do the antithetical stuff
                             off.write("let "+imco.name+"=if whenExpr"+str(anyCount)+" then "+imco.model+" "+str(imco.numScens)+" "+imco.term+imcoParams+" RNs_"+imco.name+" else []")#call inner model
                         off.write(nl)
                         for l in whoCallsWhom.values():
@@ -2144,10 +2221,10 @@ if isDependent:
             off.write("let termExpr"+str(anyCount)+"=if whenExpr"+str(anyCount)+" then (map (.state__1."+call.term+") "+stateInput+") else []"+nl)#lambda to calculate term from a calc in the state
             if not call.isStochastic:
                 off.write("let "+call.name+"_state=if whenExpr"+str(anyCount)+" ")
-                off.write("(map2 (runNPeriods_"+call.model+"_"+call.phase+" as"+str(tempASCount)+" scenInner) termExpr"+str(anyCount)+" "+stateInput+") else"+(" state__1."+call.name if call.stores else "[]")+nl)
+                off.write("(map2 (runNPeriods_"+call.model+"_"+call.phase+" (as"+str(tempASCount)+" with basisNum="+call.basis+") scenInner) termExpr"+str(anyCount)+" "+stateInput+") else"+(" state__1."+call.name if call.stores else "[]")+nl)
             else:
                 off.write("let "+call.name+"_output=if whenExpr"+str(anyCount)+" ")
-                off.write("(map2 (runStochastic_"+call.model+"_"+call.phase+" as"+str(tempASCount)+" "+call.innerScenarios+") "+" termExpr"+str(anyCount)+" "+stateInput+") else"+(" state__1."+call.name if call.stores else "[]")+nl)
+                off.write("(map2 (runStochastic_"+call.model+"_"+call.phase+" (as"+str(tempASCount)+" with basisNum="+call.basis+") "+call.innerScenarios+") "+" termExpr"+str(anyCount)+" "+stateInput+") else"+(" state__1."+call.name if call.stores else "[]")+nl)
             doACall=False
             i_call+=1
     #storage function TODO: store-all
