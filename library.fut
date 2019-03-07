@@ -11,6 +11,7 @@ let exp(x:f32):f32=f32.exp(x)
 let sqrt(x:f32):f32=f32.sqrt(x)
 let log(x:f32):f32=f32.log(x)
 let sum1(x:[]f32):f32=reduce (+) 0f32 x
+let sum=sum1
 let sum2(x:[][]f32):f32=reduce (+) 0f32 (map sum1 x)
 let prod(x:[]f32):f32=reduce (*) 1f32 x
 let sumprod(x:[]f32)(y:[]f32):f32=sum1 (map2 (*) x y )
@@ -191,7 +192,7 @@ let BSMNormInv(x:f64)=
     in ret
 
 --statistical
-let mean(x:[]f32):f32=(sum x)/(length X)
-let stdErr(x:[]32):f32=
+let mean(x:[]f32):f32=(sum x)/(real (length x))
+let stdErr(x:[]f32):f32=
     mean( x *.* x) - (mean x)**2
 let stdErrAntithetic=stdErr--TODO

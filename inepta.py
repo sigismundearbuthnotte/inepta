@@ -19,7 +19,7 @@ targetLanguage="c"#"opencl"
 maxRNsPerPeriod=10#for inner models TODO parameterise
 nl="\n"
 userDefinedFns={"real","exp","sqrt","log","sum","prod","zeros1","zeros2","zeros3","backDisc1","backDisc2","backDisc3","backDisc4","sumprod","sum1","sum2","cumprod","cumsum","udne", \
-                "interp","maxi","maxr","backDiscSingle1","backDiscSingle3","backDiscSingle2"}
+                "interp","maxi","maxr","mini","minr","backDiscSingle1","backDiscSingle3","backDiscSingle2","sum"}
 multiBracket={}#lots of []
 br="[]"
 multiBracket[0]=""
@@ -60,6 +60,9 @@ bases={}#name->basisInfo
 rebaseTimes=[]
 callInfos={}#name->callInfoObject
 innerModelCalls={}#name->inner model call object
+errorInfos={}#line number (of generated code)->errorInfo object
+currentCalcInfoObject=None#for error info
+currentCalcLine=0
 
 #classes
 class modelInfo(object):#persistent data for a model
@@ -127,6 +130,7 @@ class calcInfoObject:
         self.myPhase=None
         self.isConstant=False
         self.isInnerScenarios=False
+        self.description=""#mainly used in error messages
 
 class basisInfoObject:#might be OTT
     def __init__(self):
@@ -157,6 +161,27 @@ class innerModelCallObject:
         self.basis=""#TODO how will this work?
         self.when=""#time expression
         self.theParams=[]#all the actual model parameters
+
+class errorInfoObject:
+    def __init__(self):
+        self.ci=None#ref to calc info
+        self.ln=0#line number in ci
+
+class writer:
+    def __init__(self):
+        self.oput=None
+        self.lineCount=0#of output
+    def write(self,l):
+        self.lineCount+=1
+        self.oput.write(l)
+        ei=errorInfoObject()
+        global currentCalcInfoObject
+        global currentCalcLine
+        ei.ci=currentCalcInfoObject
+        ei.ln=currentCalcLine
+        errorInfos[l]=ei
+    def close(self):
+        self.oput.close()
 
 #utilities
 #eliminate white space,capitalise,check if it's a comment and split on multiple delimiters
@@ -196,7 +221,8 @@ numActualBases=0#1 per subbasis
 numRebased=0#1 per subbasis
 numNonRebased=0#1 per subbasis
 topModel=None
-off=open(exeSubDir+"/"+"futhark.fut",'w')
+off=writer()
+off.oput=open(exeSubDir+"/"+"futhark.fut",'w')
 
 #read enum info
 ift = open(modelSubDir + "/" + "enums", 'r')
@@ -404,6 +430,7 @@ def readBasicModelInfo(mfn):
                     if firstLine:
                         firstLine=False
                         ci.lhs = l
+                        ci.description = "Calc:" + ci.lhs + " Phase:" + ci.myPhase + " Model:"+mi.name
                         if l[0]!="(":
                             ci.name=ls[0]#not tuple
                             ci.fieldsCalcd=[ci.name]
@@ -628,10 +655,11 @@ if isDependent and topModel.innerModel!="":
             rnppAdd=True
         else:
             if rnppAdd:
+                ll=l
                 if l.__contains__("let RNsPerPeriod"):
-                    l=l.replace("let RNsPerPeriod","").replace("="," in ")
+                    ll=l.replace("let RNsPerPeriod","").replace("="," in ")
                     rnppAdd=False
-                rnpp+=l
+                rnpp+=ll
         off.write(l)
     ift.close()
 off.write(nl+innerModelSignature+nl+rnpp+nl)
@@ -774,6 +802,10 @@ def subStoreAll(mtch,l,ci,mi,isCalcInThisPhase):#return substituted code for a r
 #convert line of code - used in both code, initialisation and settting derived, does not apply to NR or R whole-array calcs
 def convCode(mi,ci,codeType,theCalls=[]):#print converted code and return the expression to call to get the value - this could be a function call for an arrayed calc
     #get code depending on what we are converting
+    global currentCalcInfoObject
+    global currentCalcLine
+    currentCalcInfoObject=ci
+    currentCalcLine=0
     tempVarCount=0
     phName=ci.myPhase
     if codeType==INITIALISATION or codeType==DERIVED:
@@ -794,6 +826,7 @@ def convCode(mi,ci,codeType,theCalls=[]):#print converted code and return the ex
         off.write(":"+("i" if ci.type!="real" else "f")+"32=\n")
     isQuoted=False
     for l in code:  # loop through lines
+        currentCalcLine+=1
         if l[0:3]=="\"\"\"":#quoting/unquoting?
             isQuoted=not isQuoted
             l=l[3:]
@@ -852,17 +885,17 @@ def convCode(mi,ci,codeType,theCalls=[]):#print converted code and return the ex
                             extraDotOne=""
                             if call.isStochastic:
                                 extraDotOne=".1"
-                            convertedFilter=" "+filter+" "
+                            convertedFilter="\\x__x-> "+filter+" "
                             mi2=modelInfos[call.model]
                             for ph2 in mi2.phases.values():
                                 for ci2 in ph2.values():
                                     for fld2 in ci2.fieldsCalcd:
-                                        convertedFilter = re.sub("[\W]" + fld2 + "[\W]",lambda x: x.group()[0] + extraDotOne+".state__1." + fld2 + x.group()[len(fld2) + 1:], convertedFilter)
+                                        convertedFilter = re.sub("[\W]" + fld2 + "[\W]",lambda x: x.group()[0] +"(x__x"+ extraDotOne+".state__1." + fld2+")" + x.group()[len(fld2) + 1:], convertedFilter)
                             for df in mi2.dataFieldInfos.values():  # add as.p. (or d.) in front of data/derived fields
                                 if df.expression == "":
-                                    convertedFilter = re.sub("[\W]" + df.name + "[\W]",lambda x: x.group()[0] + extraDotOne + ".p." + df.name + x.group()[len(df.name) + 1:], convertedFilter)
+                                    convertedFilter = re.sub("[\W]" + df.name + "[\W]",lambda x: x.group()[0] +"(x__x"+ extraDotOne + ".p." + df.name +")"+ x.group()[len(df.name) + 1:], convertedFilter)
                                 else:
-                                    convertedFilter = re.sub("[\W]" + df.name + "[\W]",lambda x: x.group()[0] + extraDotOne + ".der." + df.name + x.group()[len(df.name) + 1:], convertedFilter)
+                                    convertedFilter = re.sub("[\W]" + df.name + "[\W]",lambda x: x.group()[0] +"(x__x"+ extraDotOne + ".der." + df.name+")" + x.group()[len(df.name) + 1:], convertedFilter)
                         if call.isStochastic:
                             oputPosn=0
                             mi2 = modelInfos[call.model]
@@ -875,9 +908,9 @@ def convCode(mi,ci,codeType,theCalls=[]):#print converted code and return the ex
                                             else:
                                                 oputPosn+1
                             if filter=="":
-                                tempAssign+="sum "+call.name+"[:"+str(oputPosn)+"]"
+                                tempAssign+="sum "+call.name+"_output[:,"+str(oputPosn)+"]"
                             else:
-                                tempAssign +="sum (((unzip (filter ("+convertedFilter+")"+" (zip "+call.stateInput+" "+call.name+"))).2)[:"+str(oputPosn)+"])"
+                                tempAssign +="sum (((unzip (filter ("+convertedFilter+")"+" (zip "+call.stateInput+"_state "+call.name+"_output))).2)[:,"+str(oputPosn)+"])"
                         else:
                             if not topModel.dataFieldInfos.__contains__(fld):
                                 fldPrefix="state__1."
@@ -887,9 +920,9 @@ def convCode(mi,ci,codeType,theCalls=[]):#print converted code and return the ex
                                 else:
                                     fldPrefix="p."
                             if filter=="":
-                                tempAssign+="sum (map (."+fldPrefix+fld+")"+call.name+")"
+                                tempAssign+="sum (map (."+fldPrefix+fld+")"+call.name+"_state)"
                             else:
-                                tempAssign +="sum (map (."+fldPrefix+fld+") (filter ("+convertedFilter+")"+call.name+"))"
+                                tempAssign +="sum (map (."+fldPrefix+fld+") (filter ("+convertedFilter+")"+call.name+"_state))"
                         off.write(tempAssign+nl)
                         l=l[:sPos+1]+"tempVar" + str(tempVarCount)+l[ePos+1:]
                         break#only do one occurence as changing the string
@@ -1071,6 +1104,7 @@ def convCode(mi,ci,codeType,theCalls=[]):#print converted code and return the ex
             off.write("in map " + ci.name + "_arr1 (iota " + str(ci.dimSizes[0]) + ")\n")#fixed array size
         else:
             off.write("in map " + ci.name + "_arr1 (iota " + "as.p."+ci.sizeMax + ")\n")#array with maximum size but upper bound for calcs given by data
+    currentCalcInfoObject=None
 
 #Global function code (this is user defined, so not read verbatim)
 ift=open(modelSubDir+"/"+"functions",'r')
@@ -1091,13 +1125,18 @@ if not isDependent:
 
 numOutputs=0#allow for array size (1d only)
 mi=(topModel if isDependent else indModel)
+outputNames=[]
 for ph in mi.phases.values():
     for ci in ph.values():
         if ci.isOutput:
             if not ci.isArrayed:
-                numOutputs+=1
+                for fld in ci.fieldsCalcd:
+                    outputNames=outputNames.__add__([fld])
+                    numOutputs+=1
             else:
                 numOutputs+=ci.dimSizes[0]
+                for i in range(0,ci.dimSizes[0]):
+                    outputNames = outputNames.__add__([ci.name+"["+str(i)+"]"])
 off.write("let numOutputs:i32="+str(numOutputs)+nl)
 
 #number of outputs for submodels - for stochastic
@@ -1123,6 +1162,8 @@ off.write("let firstProjectionPeriod:i32=("+str(mi.firstProjectionPeriod)+")"+nl
 off.write("let lastProjectionPeriod:i32=(" + str(mi.lastProjectionPeriod) + ")" + nl)
 off.write("let numPeriods:i32=lastProjectionPeriod-firstProjectionPeriod+1" + nl)
 off.write("let numScens:f32="+str(numScens)+nl)
+off.write("let firstprojectionperiod:i32=("+str(mi.firstProjectionPeriod)+")"+nl)#don't remove me, I'm not a duplicate!
+off.write("let lastprojectionperiod:i32=(" + str(mi.lastProjectionPeriod) + ")" + nl)
 numPeriods=mi.lastProjectionPeriod-mi.firstProjectionPeriod+1
 
 #data-record types (does not apply to top)
@@ -1316,7 +1357,7 @@ for mi in modelInfosPlus.values():
                         off.write("let i_" + mName + "_" + ci.name + ":i32=" + str(inds_added[ci.overwrites]) + nl)
                         off.write("let i_" + mName + "_" + ci.name + "_end:i32=i_" + mName +"_"+ci.overwrites+"_end" + nl)
                         inds_added[ci.name]=inds_added[ci.overwrites]
-    off.write("let numSAs:i32="+str(i_count)+nl)
+off.write("let numSAs:i32="+str(i_count)+nl)
 
 #scenario type and conversion function (including inner scenarios, if present)
 hasESG=False
@@ -1383,11 +1424,12 @@ off.write("\nunsafe\n\n")
 #Are there NR or R bases?
 haveNR=False
 haveR=False
-for b in bases.values():
-    if b.name!="Experience" and not b.isRebase:
-        haveNR=True
-    if b.name!="Experience" and b.isRebase:
-        haveR=True
+if not isDependent:
+    for b in bases.values():
+        if b.name!="Experience" and not b.isRebase:
+            haveNR=True
+        if b.name!="Experience" and b.isRebase:
+            haveR=True
 
 #rebase times
 if haveR:
@@ -1408,7 +1450,7 @@ if hasESG:
         off.write("{")
         comma=""
         for (k,v) in topModel.innerESG.items():
-            off.write(comma+k+"="+k+nl)
+            off.write(comma+k+"=scen."+k+nl)
             comma=","
         off.write("}"+nl)
         off.write("let scensAsInner=map scenToInner scens"+nl)
@@ -1675,8 +1717,8 @@ if isDependent:
                 if haveAll:
                     pass
                 else:
-                    off.write("let  runNPeriodsWithOutput_"+mi.name+"_"+phName+" (asTop:state_top_all)  (n:i32) (as:state_"+mi.name+"_all) (scen:oneScenInner):[]f32"+nl)
-                    off.write("\tlet asNew=(iterate n (runOnePeriod_"+mi.name+"_"+phName+" asTop scen)  as in"+nl)
+                    off.write("let  runNPeriodsWithOutput_"+mi.name+"_"+phName+" (asTop:state_top_all)  (n:i32) (as:state_"+mi.name+"_all) (scen:oneScenInner):[]f32="+nl)
+                    off.write("\tlet asNew=(iterate n (runOnePeriod_"+mi.name+"_"+phName+" asTop scen))  as in"+nl)
                     off.write("\t[")
                     comma=""
                     for ci in ph.values():
@@ -1703,7 +1745,7 @@ if isDependent:
                     off.write("let runStochastic_"+mi.name+"_"+phName+ " (asTop:state_top_all) (scens:[]oneScenInner) (n:i32) (as:state_"+mi.name+"_all):[]f32="+nl)#returns mean value of output
                     off.write("let allSimsResults:[][]f32=map (runNPeriodsWithOutput_"+mi.name+"_"+phName+" asTop n as) scens"+nl)#scen x item
                     off.write("let sumSims = reduce (+.+) (zeros1 numOutputs_"+mi.name+") allSimsResults"+nl)
-                    off.write("in map (/(length scens)) sumSims"+nl)
+                    off.write("in map (/(real (length scens))) sumSims"+nl)
 
 #functions to do NR runs: phase 1 runNPeriod.  The latter also stores the __NR1 calcs in the correct place in s/a (in the store function)
 if haveNR:
@@ -1830,7 +1872,7 @@ for mi in modelInfosPlus.values():
     if mi.hasDerived:
         off.write("der = der,"+nl)
     off.write("state__1 = zero_state_"+mi.name+","+nl)
-    for i in range(2, maxStored + 1):#past values records
+    for i in range(2, mi.maxStored + 1):#past values records
         off.write("state__" + str(i) + "={")
         comma=""
         for (phName, ph) in mi.phases.items():
@@ -1850,7 +1892,7 @@ for mi in modelInfosPlus.values():
     off.write("}\n")
     off.write(nl)
 
-    if isDependent:
+    if isDependent and not mi is topModel:
         off.write("let zeros_as_"+mi.name+"=map"+("2 " if mi.hasDerived else " ")+"zero_as_"+mi.name+" fileData_"+mi.name+(" derived_"+mi.name if mi.hasDerived else "")+nl)#create array of zeroised states and all-states for sub-models
 
 #all the special stuff for the independent case
@@ -2123,12 +2165,12 @@ if isDependent:
     off.write("let RNsPerIteration:i32=numBlocksOf624*624"+nl)
     off.write("let seeds:[]u32=5984...(5984+(u32.i32 numBlocksOf624-1))"+nl)
     off.write("let initStatesOf624:[][]u32=map initMT seeds"+nl)
-    off.write("let U_inner':*[][]f32=replicate numMTItersPerBatchOfRNs (replicate RNsPerIteration 0f32)"+nl)#zeroise in-place array to fill with RNs
+    off.write("let U_inner':*[][]f32=replicate numMTItersPerBatchOfRNs (replicate RNsPerIteration 0f32)"+nl)#zeroise in-place array to fill with all the RNs
     off.write("let (U_inner'':*[][]f32,_)=loop (u':*[][]f32,st':[][]u32)=(U_inner',initStatesOf624) for i<numMTItersPerBatchOfRNs do" + nl)
     off.write("\tlet (st'',u'')=unzip (map nextBlockOf624 st')"+nl)
-    off.write("\tlet u'''=map BSMNormInv (map f32.f64 (flatten u''))"+nl)
+    off.write("\tlet u'''=map f32.f64 (map BSMNormInv (flatten u''))"+nl)
     off.write("\t in (u' with [i]=u''',st'')"+nl)
-    off.write("let innerRNs:[][]f32=flatten (copy U_inner'')"+nl)
+    off.write("let innerRNs:[]f32=flatten U_inner''"+nl)
 
     #function to run 1 period of the top model.  NB "scenInner" is actually the inner form of the outer scen.  It is used to evolve the submodels in the outer scenario.
     off.write("\nlet  runOnePeriod_top (scen:oneScen) (scenInner:oneScenInner) (as:state_top_all)"+(" (storeAll:*[][]f32):" if haveAll else ":"))
@@ -2189,7 +2231,7 @@ if isDependent:
                             imcoParams=" ("+",".join([imco.name+"_"+str(ii) for ii in range(0,len(imco.theParams))])+") "#tuple of params
                             off.write("let "+imco.name+"_RNsPerPeriod=if whenExpr"+str(anyCount)+" then "+imco.model+"_RNsPerPeriod "+str(imco.numScens)+" "+imco.term+imcoParams+" [] else 0"+nl)#get number of RNs per period
                             off.write("let RNs_"+imco.name+"=innerRNs[0:"+str(imco.numScens)+"*"+imco.term+"*"+imco.name+"_RNsPerPeriod"+"//2]"+nl)#the inner model will do the antithetical stuff
-                            off.write("let "+imco.name+"=if whenExpr"+str(anyCount)+" then "+imco.model+" "+str(imco.numScens)+" "+imco.term+imcoParams+" RNs_"+imco.name+" else []")#call inner model
+                            off.write("let "+imco.name+"=scensInnerFromArrays (if whenExpr"+str(anyCount)+" then "+imco.model+" "+str(imco.numScens)+" "+imco.term+imcoParams+" RNs_"+imco.name+" else ([]))")#call inner model
                         off.write(nl)
                         for l in whoCallsWhom.values():
                             if l.__contains__(caller):
@@ -2218,13 +2260,15 @@ if isDependent:
             stateInput=call.stateInput
             if stateInput[-3:]=="__1":
                 stateInput="as.state__1."+stateInput[:-3]
-            off.write("let termExpr"+str(anyCount)+"=if whenExpr"+str(anyCount)+" then (map (.state__1."+call.term+") "+stateInput+") else []"+nl)#lambda to calculate term from a calc in the state
-            if not call.isStochastic:
-                off.write("let "+call.name+"_state=if whenExpr"+str(anyCount)+" ")
-                off.write("(map2 (runNPeriods_"+call.model+"_"+call.phase+" (as"+str(tempASCount)+" with basisNum="+call.basis+") scenInner) termExpr"+str(anyCount)+" "+stateInput+") else"+(" state__1."+call.name if call.stores else "[]")+nl)
             else:
-                off.write("let "+call.name+"_output=if whenExpr"+str(anyCount)+" ")
-                off.write("(map2 (runStochastic_"+call.model+"_"+call.phase+" (as"+str(tempASCount)+" with basisNum="+call.basis+") "+call.innerScenarios+") "+" termExpr"+str(anyCount)+" "+stateInput+") else"+(" state__1."+call.name if call.stores else "[]")+nl)
+                stateInput=stateInput+"_state"
+            off.write("let termExpr"+str(anyCount)+"=if whenExpr"+str(anyCount)+" then (map (.state__1."+call.term+") "+stateInput+") else ([])"+nl)#lambda to calculate term from a calc in the state
+            if not call.isStochastic:
+                off.write("let "+call.name+"_state=if whenExpr"+str(anyCount)+" then ")
+                off.write("(map2 (runNPeriods_"+call.model+"_"+call.phase+" (as"+str(tempASCount)+" with basisNum="+call.basis+") scenInner) termExpr"+str(anyCount)+" "+stateInput+") else"+(" as.state__1."+call.name if call.stores else "([])")+nl)
+            else:
+                off.write("let "+call.name+"_output=if whenExpr"+str(anyCount)+" then ")
+                off.write("(map2 (runStochastic_"+call.model+"_"+call.phase+" (as"+str(tempASCount)+" with basisNum="+call.basis+") "+call.innerScenarios+") "+" termExpr"+str(anyCount)+" "+stateInput+") else"+(" state__1."+call.name if call.stores else "([])")+nl)
             doACall=False
             i_call+=1
     #storage function TODO: store-all
@@ -2250,7 +2294,7 @@ if isDependent:
 
     #function to initialise top (and submodels)
     off.write(nl)
-    off.write("init_top (s:state_top) (scen:OneScen):state_top="+nl)
+    off.write("let init_top (s:state_top) (scen:oneScen):state_top="+nl)
     comma=""
     inited=set()
     for (cin,ci) in topPhase.items():
@@ -2268,7 +2312,7 @@ if isDependent:
         else:#call, call the appropriate submodel phase initialisation
             call=callInfos[ci.name]
             if call.stores:
-                off.write(call.name+"=map ((\\a b c:->init_"+call.model+"_"+call.phase+"_all c a b) scen 0) s."+call.name+nl)
+                off.write("let "+call.name+"=map ((\\a b c->init_"+call.model+"_"+call.phase+"_all c a b) scen 0) s."+call.name+nl)
                 inited.add(call.name)
     if len(inited) != 0:#withs...
         off.write("\nin s ")
@@ -2280,7 +2324,7 @@ if isDependent:
 
     #function to run N periods of the top model and get output (initialise state and all-state for top model first)
     off.write(nl)
-    off.write("runNPeriodsWithOutput_top (n:i32) (scen:oneScen) (scenInner:oneScenInner) :[]f32="+nl)
+    off.write("let runNPeriodsWithOutput_top (n:i32) (scen:oneScen) (scenInner:oneScenInner) :[]f32="+nl)
     off.write("\tlet init_as=zero_as_top with state__1=init_top zero_as_top.state__1 scen"+nl)#initialise top model state (both for calcs and for sub-models that are stored)
     off.write("\tlet asNew=iterate n (runOnePeriod_top scen scenInner) init_as in"+nl)
     off.write("[")
@@ -2333,7 +2377,7 @@ ofc.write("struct futhark_context * ctx = futhark_context_new(cfg);"+nl)
 #declare c table arrays
 ofc.write("\nfloat ")
 comma=""
-for mi in modelInfos.values():
+for mi in modelInfosPlus.values():
     for (k,t) in mi.tableInfos.items():
         ofc.write(comma+"*table_"+k+"_"+mi.name)
         comma=","
@@ -2389,7 +2433,7 @@ for basis in bases:
     ofc.write(comma+"\""+basis+"\"")
     comma=","
 ofc.write("};\n")
-for mi in modelInfos.values():
+for mi in modelInfosPlus.values():
     for (k,t) in mi.tableInfos.items():
         comma=""
         ofc.write("int lb_"+k+"_"+mi.name+"[2];"+nl)#declare c arrays to hold table lower bounds
@@ -2412,7 +2456,7 @@ for mi in modelInfos.values():
 
 #create futhark table arrays
 tables=[]
-for mi in modelInfos.values():
+for mi in modelInfosPlus.values():
     for (k,t) in mi.tableInfos.items():
         ofc.write("struct futhark_f32_"+str((1 if t.basis!="SINGLE" else 0)+len(t.dims))+"d *fut_"+"table_"+k+"_"+mi.name+"=futhark_new_f32_"+str((1 if t.basis!="SINGLE" else 0)+len(t.dims))+"d(ctx,"+"table_"+k+"_"+mi.name+(","+str(numBases)if t.basis!="SINGLE" else "")+",")
         tables=tables.__add__(["fut_"+"table_"+k+"_"+mi.name])
@@ -2472,15 +2516,20 @@ if hasESG:
     ofc.write("struct futhark_f32_3d *fut_scens=futhark_new_f32_3d(ctx,scens,"+str(numScens)+",numScenPeriods,"+str(schLineLength)+");" + nl)
 
 #create the futhark results arrays
-numOutputs=0
-for mi in modelInfos.values():
-    numPeriods=mi.lastProjectionPeriod-mi.firstProjectionPeriod+1
-    for ph in mi.phases.values():
-        for ci in ph.values():
-            if ci.isOutput:
-                numOutputs+=(1 if ci.dimSizes==[] else ci.dimSizes[0])
-ofc.write("struct futhark_f32_"+("2" if outputMode=="VECTOR" else "1")+"d *fut_Res;\n")
-ofc.write("float *res=(float*) malloc("+str(numOutputs)+("*"+str(numPeriods)if outputMode=="VECTOR" else "")+"*sizeof(float));\n")
+if not isDependent:
+    numOutputs = 0
+    for mi in modelInfos.values():
+        numPeriods=mi.lastProjectionPeriod-mi.firstProjectionPeriod+1
+        for ph in mi.phases.values():
+            for ci in ph.values():
+                if ci.isOutput:
+                    numOutputs+=(1 if ci.dimSizes==[] else ci.dimSizes[0])
+if not isDependent:
+    ofc.write("struct futhark_f32_"+("2" if outputMode=="VECTOR" else "1")+"d *fut_Res;\n")
+    ofc.write("float *res=(float*) malloc("+str(numOutputs)+("*"+str(numPeriods)if outputMode=="VECTOR" else "")+"*sizeof(float));\n")
+else:
+    ofc.write("struct futhark_f32_"+("2" if not averageOverScenarios else "1")+"d *fut_Res;\n")
+    ofc.write("float *res=(float*) malloc("+str(numOutputs)+("*"+str(numScens)if not averageOverScenarios else "")+"*sizeof(float));\n")
 
 #call futhark (incl.timing)
 ofc.write("struct timespec startTime,endTime;\n")
@@ -2490,25 +2539,29 @@ ofc.write("int futErr=futhark_entry_main(ctx,&fut_Res,"+(" fut_scens " if hasESG
 for dfl in dataFiles:
     ofc.write("fut_"+dfl+",")
 comma=""
-for (kt,t) in mi.tableInfos.items():
-    ofc.write(comma+"fut_table_"+kt+"_"+mi.name)
-    comma=","
-    if t.dim1HasLB or  t.dim2HasLB:
-        ofc.write(comma+"fut_lb_"+kt+"_"+mi.name)
+for mi in modelInfosPlus.values():
+    for (kt,t) in mi.tableInfos.items():
+        ofc.write(comma+"fut_table_"+kt+"_"+mi.name)
+        comma=","
+        if t.dim1HasLB or  t.dim2HasLB:
+            ofc.write(comma+"fut_lb_"+kt+"_"+mi.name)
 ofc.write(");\n")
 
 ofc.write("clock_gettime(CLOCK_PROCESS_CPUTIME_ID,&endTime);\n")
 ofc.write("double diffTime=(endTime.tv_sec-startTime.tv_sec)+(endTime.tv_nsec-startTime.tv_nsec)/1e9;\n")
 
 #get results from futhark
-ofc.write("futhark_values_f32_"+("2" if outputMode=="VECTOR" else "1")+"d(ctx,fut_Res,res);\n")
+if not isDependent:
+    ofc.write("futhark_values_f32_"+("2" if outputMode=="VECTOR" else "1")+"d(ctx,fut_Res,res);\n")
+else:
+    ofc.write("futhark_values_f32_"+("2" if not averageOverScenarios else "1")+"d(ctx,fut_Res,res);\n")
 
 #free c table arrays
 for tbl in tables:
     ofc.write("freeReals ("+tbl[4:]+");"+nl)
 
 #free futhark table arrays
-for mi in modelInfos.values():
+for mi in modelInfosPlus.values():
     for (k,t) in mi.tableInfos.items():
         ofc.write("futhark_free_f32_"+str((1 if t.basis!="SINGLE" else 0)+len(t.dims))+"d(ctx,fut_table_"+k+"_"+mi.name+");\n")
 
@@ -2543,6 +2596,27 @@ ofc.write("futhark_context_free(ctx);\n")
 ofc.write("futhark_context_config_free(cfg);\n")
 
 #output results to file
+ofc.write("FILE *fp;\n")
+ofc.write("fp=fopen(\""+outputSubDir+"/futhark.out\",w);"+nl)
+fmtstr="%s         "*len(outputNames)
+ofc.write("fprint(fp,\""+fmtstr+"\","+",".join(outputNames)+");"+nl)
+fmtstr="%d         "*len(outputNames)
+if isDependent:
+    if averageOverScenarios:
+        pass
+    else:
+        ofc.write("for (int scen=0;scen<"+str(numScens)+";++scen)"+nl)
+        ofc.write("\tfprint(fp,\""+fmtstr+"\",")
+        for i in range(0,numOutputs):
+            ofc.write("res[]")
+        ofc.write(");"+nl)
+else:
+    if outputMode=="Vector":
+        pass
+    else:
+        pass
+
+ofc.write("fclose(fp);"+nl)
 
 ofc.write("\nreturn 0;\n")
 ofc.write("}"+nl)
@@ -2551,7 +2625,26 @@ ofc.close()
 #Compile Futhark to Futhark library
 if compileFuthark:
     os.environ["PATH"]+=os.pathsep+futharkPath#goodness only knows why I need to do this...
-    subprocess.run(["futhark "+targetLanguage+" --library futhark.fut"],cwd=exeSubDir,shell=True)#individual arguments do not seem to work...
+    cp=subprocess.run(["futhark "+targetLanguage+" --library futhark.fut"],cwd=exeSubDir,shell=True,stderr=subprocess.PIPE,universal_newlines=True)#individual arguments do not seem to work...
+    if cp.stderr.__contains__("Error"):
+        itern=re.finditer(":[0-9]+:",cp.stderr)
+        for mtch in itern:
+            errLine = int(mtch.group()[1:-1])
+            print("Error in line " +str(errLine)+" of generated code.")
+            ift = open(exeSubDir + "/" + "futhark.fut", 'r')#find the offending line
+            for i in range(0,errLine):
+                l=ift.readline()
+            ift.close()
+            if l in errorInfos:
+                ei=errorInfos[l]
+                if not ei.ci is None:
+                    print("This corresponds to "+ei.ci.description+" line "+str(ei.ln)+" of calc.")
+                else:
+                    print("Sorry. No further Inepta information is available.")
+            else:
+                print("Sorry. No further Inepta information is available.")
+    else:
+        print("Bloody hell, it compiled!")
 
 #Compile latter to C
 if compileC:
