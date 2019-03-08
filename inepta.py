@@ -223,6 +223,7 @@ numNonRebased=0#1 per subbasis
 topModel=None
 off=writer()
 off.oput=open(exeSubDir+"/"+"futhark.fut",'w')
+callCount = 0
 
 #read enum info
 ift = open(modelSubDir + "/" + "enums", 'r')
@@ -516,7 +517,8 @@ firstRebasedBasis=0
 scensFile=""
 outputMode="VECTOR"
 stochasticSummaryFunctions=[]#would be false e.g. for scr run, only applicable to dependent should always be true for independent stochastic
-averageOverScenarios=False
+averageOverScenarios=False#applies to dependent only
+individualOutput=False#applies to independent only
 for l in ift.readlines():
     (ls,c,lsu)=nwscap(l,",=")
     if c:
@@ -529,7 +531,7 @@ for l in ift.readlines():
                 doErr("Unterminated section preceding ", ls[0])
             continue
         if section=="BASIC":
-            if lsu[0] not in set(["MODE","STOCHASTIC","NUMSCENARIOS","NUMINNERSCENARIOS","FILE","OUTPUT","STOCHASTICSUMMARYFUNCTIONS","AVERAGEOVERSCENARIOS"]):
+            if lsu[0] not in set(["MODE","STOCHASTIC","NUMSCENARIOS","NUMINNERSCENARIOS","FILE","OUTPUT","STOCHASTICSUMMARYFUNCTIONS","AVERAGEOVERSCENARIOS","INDIVIDUALOUTPUT"]):
                 doErr("Unknown basic setting for top level model file: ",l)
             if lsu[0]=="MODE":
                 if lsu[1] not in set(["DEPENDENT","INDEPENDENT"]):
@@ -549,6 +551,8 @@ for l in ift.readlines():
                 stochasticSummaryFunctions=[ll for ll in ls[1:]]
             if lsu[0]=="AVERAGEOVERSCENARIOS":
                 averageOverScenarios= (False if lsu[1]=="FALSE" else True)
+            if lsu[0] == "INDIVIDUALOUTPUT":
+                individualOutput = (False if lsu[1] == "FALSE" else True)
         if section=="SUBBASE":
             if lsu[0]=="NAME":
                 sbVals[ls[1]]=[]
@@ -600,7 +604,13 @@ for l in ift.readlines():
 
 #in certain cases we might want to process the top model with the others
 modelInfosPlus=modelInfos.copy()
-modelInfosPlus["top"]=topModel
+if isDependent:
+    modelInfosPlus["top"]=topModel
+    for ph in topModel.phases.values():
+        for ci in ph.values():
+            if ci.isCall:
+                off.write("let Call__" + ci.name + "=" + str(callCount) + nl)
+                callCount += 1
 
 #enum for actual bases plus rebase info which may be read from run parameters instead in future developments
 doRebase="["
@@ -662,7 +672,7 @@ if isDependent and topModel.innerModel!="":
                 rnpp+=ll
         off.write(l)
     ift.close()
-off.write(nl+innerModelSignature+nl+rnpp+nl)
+    off.write(nl+innerModelSignature+nl+rnpp+nl)
 
 def convUserFn(l):
     #repeatedly look for user defined functions and replace f(,,) with (f () () )
@@ -845,7 +855,9 @@ def convCode(mi,ci,codeType,theCalls=[]):#print converted code and return the ex
             l = l.replace("return ", "\tin ")
         else:
             l = l.replace("return ", "")
-        l = re.sub("[\W]" + "Me__" + "[\W]",lambda x: x.group()[0] + "as.p.Me__" + x.group()[5:], l)
+        l = re.sub("[\W]" + "Me__" + "[\W]",lambda x: x.group()[0] + "as.p.Me__" + x.group()[5:], l)#Me__
+        l = re.sub("[\W]" + "Call__t" + "[\W]", lambda x: x.group()[0] + "asTop.Call__t" + x.group()[8:], l)#Call__t
+        l = re.sub("[\W]" + "Call__" + "[\W]", lambda x: x.group()[0] + "asTop.Call__" + x.group()[7:], l)#Call__t
         haveTempVars=False
         if mi.name=="top" and theCalls!=[]:#replace calls to submodel calls with temporary variables. Options: Filtered/Unfiltered Stochastic(output)/Non(state).  Former is much harder: needs zipping with the input state in order to do filtering.
             doCalls=True
@@ -1131,12 +1143,12 @@ for ph in mi.phases.values():
         if ci.isOutput:
             if not ci.isArrayed:
                 for fld in ci.fieldsCalcd:
-                    outputNames=outputNames.__add__([fld])
+                    outputNames=outputNames.__add__(["\""+fld+"\""])
                     numOutputs+=1
             else:
                 numOutputs+=ci.dimSizes[0]
                 for i in range(0,ci.dimSizes[0]):
-                    outputNames = outputNames.__add__([ci.name+"["+str(i)+"]"])
+                    outputNames = outputNames.__add__(["\""+ci.name+"["+str(i)+"]"+"\""])
 off.write("let numOutputs:i32="+str(numOutputs)+nl)
 
 #number of outputs for submodels - for stochastic
@@ -1283,7 +1295,10 @@ for mi in modelInfosPlus.values():
                         if ls[i].upper()=="MODEL":
                             subModel=ls[i+1]
                             break
-                    off.write(comma+ci.name+":[]state_"+subModel+"_all"+nl)
+                    if not l.__contains__("stochastic=true"):
+                        off.write(comma+ci.name+":[]state_"+subModel+"_all"+nl)
+                    else:
+                        off.write(comma + ci.name + ":[][]f32" + nl)
                     comma=","
     if not anyField:#add dummy field to prevent empty type
         off.write("x__zog:f32")
@@ -1319,6 +1334,8 @@ for mi in modelInfosPlus.values():
     off.write("t:i32,\n")#actual time
     off.write("i_t:i32,\n")#time for indexing s/as
     off.write("forceTheIssue:f32,\n")
+    if mi is topModel:
+        off.write("Call__:i32,Call__t:i32,")
     off.write("basisNum:i32\n}\n")
 
     #constants giving indexes into the store_all array (the start, for an array)
@@ -1415,7 +1432,7 @@ for mi in modelInfosPlus.values():#tables and their lower bounds (for (possibly)
     for t in mi.tableInfos.values():
         off.write(" (table_"+t.name+"_"+mi.name+":"+("[numBases]" if t.basis!="SINGLE" else "")+multiBracket[len(t.dims)]+"f32)"+(" (lb_"+t.name+"_"+mi.name+":[]i32)" if t.dim1HasLB or t.dim2HasLB else ""))
 if not isDependent:
-    off.write(":"+("[]" if outputMode=="VECTOR" else "")+"[]f32="+nl)#independent: item (x time) (always average of scens)
+    off.write(":"+("[]" if outputMode=="VECTOR" else "")+("[]" if individualOutput else "")+"[]f32="+nl)#independent: item (x time) (always average of scens)
 else:
     off.write(":"+("[]" if not averageOverScenarios else "")+"[]f32="+nl)#dependent: item (x scen, if not averaging) (output over time not allowed; however, could fake it using an arrayed calc)
 
@@ -1861,7 +1878,10 @@ for mi in modelInfosPlus.values():
                         if ls[i].upper()=="MODEL":
                             subModel=ls[i+1]
                             break
-                    off.write(comma+ci.name+"=zeros_as_"+subModel)
+                    if not l.__contains__("stochastic=true"):
+                        off.write(comma+ci.name+"=zeros_as_"+subModel+nl)
+                    else:
+                        off.write(comma+ci.name+"=[]"+nl)
                     comma=","
     off.write("}\n")
 
@@ -1889,6 +1909,8 @@ for mi in modelInfosPlus.values():
     off.write("i_t = 0,"+nl)
     off.write("basisNum = 0,"+nl)
     off.write("forceTheIssue=0")
+    if mi is topModel:
+        off.write(",Call__=0,Call__t=0")
     off.write("}\n")
     off.write(nl)
 
@@ -2031,17 +2053,27 @@ if not isDependent:
     if mi.batchSizeInternal>0:
         off.write("\nlet batchSize:i32="+str(mi.batchSizeInternal)+nl)
         off.write("let numBatches=if numPols%%batchSize==0 then (numPols//batchSize) else (numPols//batchSize+1)\n")
-        off.write("let sumOfBatches=\n")
-        off.write("\tloop sumOfBatches':"+("[]" if outputMode=="VECTOR" else "")+"[][]f32=(zeros"+("3" if outputMode=="VECTOR" else "2")+" batchSize "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" for i<numBatches do\n")
+        off.write("let "+("sum" if not individualOutput else "concat")+"OfBatches=\n")
+        if not individualOutput:
+            off.write("\tloop sumOfBatches':"+("[]" if outputMode=="VECTOR" else "")+"[][]f32=(zeros"+("3" if outputMode=="VECTOR" else "2")+" batchSize "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" for i<numBatches do\n")
+        else:
+            off.write("\tloop concatOfBatches':"+("[]" if outputMode=="VECTOR" else "")+"[][]f32=[] for i<numBatches do\n")
         off.write("\tlet lo=i*batchSize\n")
         off.write("\tlet hi=mini ((i+1i32)*batchSize) numPols\n")
         off.write("\tlet batchRes = map2 (runOnePol"+("AllScens" if isStochastic else "")+"_"+mName+(" scens"+("[0]"if not isStochastic else "")+")" if hasESG else ")")+" fileData_"+mName+"[lo:hi] derived_"+mName+"[lo:hi]\n")
-        off.write("\tin sumOfBatches' +."+("." if outputMode=="VECTOR" else "")+".+ batchRes\n")
-        off.write("in reduce (+."+("." if outputMode=="VECTOR" else "")+"+) (zeros"+("2" if outputMode=="VECTOR" else "1")+" "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" sumOfBatches\n")
+        if not individualOutput:
+            off.write("\tin sumOfBatches' +." + ("." if outputMode == "VECTOR" else "") + ".+ batchRes\n")
+            off.write("in reduce (+."+("." if outputMode=="VECTOR" else "")+"+) (zeros"+("2" if outputMode=="VECTOR" else "1")+" "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" sumOfBatches\n")
+        else:
+            off.write("\tin concatOfBatches'++batchRes"+nl)
+            off.write("in concatOfBatches"+nl)
     else:
         off.write(nl)
         off.write("let res = map2 (runOnePol"+("AllScens" if isStochastic else "")+"_"+mName+(" scens"+("[0]"if not isStochastic else "")+")" if hasESG else ")")+" fileData_"+mName+" derived_"+mName+nl)
-        off.write("in reduce (+."+("." if outputMode=="VECTOR" else "")+"+) (zeros"+("2" if outputMode=="VECTOR" else "1")+" "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" res\n")
+        if not individualOutput:
+            off.write("in reduce (+."+("." if outputMode=="VECTOR" else "")+"+) (zeros"+("2" if outputMode=="VECTOR" else "1")+" "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" res\n")
+        else:
+            off.write("in res"+nl)
 
 #Dependent case - all the top model code - directly within main
 if isDependent:
@@ -2248,13 +2280,14 @@ if isDependent:
             off.write("let as"+str(tempASCount)+"=as")#temporary state incorporating top model calcs so far, to pass into call
             if tempASCount>1:
                 off.write(str(tempASCount-1))
+            call=theCalls[i_call]
             if i_phase>=1:#in case call right at start
                 for ci in thePhases[i_phase-1].values():#incorporate the changes in the last pseudo-phase
                     if ci.stores>0:
                         for fld in ci.fieldsCalcd:
                             off.write(" with state__1."+fld+"="+fld)
+            off.write(" with Call__=Call__"+call.name+" with Call__t=t+1")
             off.write(nl)
-            call=theCalls[i_call]
             anyCount+=1
             off.write("let whenExpr"+str(anyCount)+":bool="+call.when+nl)
             stateInput=call.stateInput
@@ -2268,7 +2301,13 @@ if isDependent:
                 off.write("(map2 (runNPeriods_"+call.model+"_"+call.phase+" (as"+str(tempASCount)+" with basisNum="+call.basis+") scenInner) termExpr"+str(anyCount)+" "+stateInput+") else"+(" as.state__1."+call.name if call.stores else "([])")+nl)
             else:
                 off.write("let "+call.name+"_output=if whenExpr"+str(anyCount)+" then ")
-                off.write("(map2 (runStochastic_"+call.model+"_"+call.phase+" (as"+str(tempASCount)+" with basisNum="+call.basis+") "+call.innerScenarios+") "+" termExpr"+str(anyCount)+" "+stateInput+") else"+(" state__1."+call.name if call.stores else "([])")+nl)
+                off.write("(map2 (runStochastic_"+call.model+"_"+call.phase+" (as"+str(tempASCount)+" with basisNum="+call.basis+") "+call.innerScenarios+") "+" termExpr"+str(anyCount)+" "+stateInput+") else"+(" state__1."+call.name if (call.stores and not call.isStochastic) else "([])")+nl)
+                if call.stores:
+                    tempASCount+=1
+                    off.write("let as"+str(tempASCount)+"=as")
+                    if tempASCount>1:
+                        off.write(str(tempASCount-1))
+                    off.write(" with state__1."+call.name+"="+call.name+"_output"+nl)
             doACall=False
             i_call+=1
     #storage function TODO: store-all
@@ -2282,7 +2321,8 @@ if isDependent:
         for ci in topPhase.values():
             if ci.stores >= i or (i==1 and ci.isOutput and outputMode=="SCALAR"):
                 for fld in ci.fieldsCalcd:
-                    off.write(" with "+fld+"="+("as.state__"+str(i-1)+"." if i>1 else "")+fld+("_state" if ci.isCall else ""))
+                    if not ci.isCall or not callInfos[ci.name].isStochastic:
+                        off.write(" with "+fld+"="+("as.state__"+str(i-1)+"." if i>1 else "")+fld+("_state" if ci.isCall else ""))
         off.write(nl)
     off.write("let asNew=as "+nl)#new all-state
     for i in range(1, topModel.maxStored + 1):
@@ -2311,7 +2351,7 @@ if isDependent:
                     inited.add(fld)
         else:#call, call the appropriate submodel phase initialisation
             call=callInfos[ci.name]
-            if call.stores:
+            if call.stores and not call.isStochastic:
                 off.write("let "+call.name+"=map ((\\a b c->init_"+call.model+"_"+call.phase+"_all c a b) scen 0) s."+call.name+nl)
                 inited.add(call.name)
     if len(inited) != 0:#withs...
@@ -2597,24 +2637,38 @@ ofc.write("futhark_context_config_free(cfg);\n")
 
 #output results to file
 ofc.write("FILE *fp;\n")
-ofc.write("fp=fopen(\""+outputSubDir+"/futhark.out\",w);"+nl)
+ofc.write("fp=fopen(\""+outputSubDir+"/futhark.out\",\"w\");"+nl)
 fmtstr="%s         "*len(outputNames)
-ofc.write("fprint(fp,\""+fmtstr+"\","+",".join(outputNames)+");"+nl)
-fmtstr="%d         "*len(outputNames)
+ofc.write("fprint(fp,\""+("Policy" if not isDependent and individualOutput else "")+("Scenario" if isDependent and not averageOverScenarios else "")+fmtstr+"\","+",".join(outputNames)+");"+nl)
+fmtstr=("%d         " if isDependent and not averageOverScenarios or not isDependent and individualOutput else "")+"%f         "*len(outputNames)
 if isDependent:
     if averageOverScenarios:
-        pass
-    else:
-        ofc.write("for (int scen=0;scen<"+str(numScens)+";++scen)"+nl)
-        ofc.write("\tfprint(fp,\""+fmtstr+"\",")
+        ofc.write("fprint(fp,\""+fmtstr+"\"")
         for i in range(0,numOutputs):
-            ofc.write("res[]")
+            ofc.write(","+"res["+str(i)+"]")
         ofc.write(");"+nl)
-else:
+    else:#individual (outer) scenarios
+        ofc.write("for (int scen=0;scen<"+str(numScens)+";++scen){"+nl)
+        ofc.write("\tint ind=scen*"+str(numOutputs)+";"+nl)
+        ofc.write("\tfprint(fp,\""+fmtstr+"\"")
+        ofc.write(",scen")
+        for i in range(0,numOutputs):
+            ofc.write(","+"res[ind+"+str(i)+"]")
+        ofc.write(");"+nl)
+        ofc.write("}\n")
+else:#independent
+    if individualOutput:#policy loop
+        ofc.write("for (int pol=0;pol<numPols;++pol){"+nl)
+        ofc.write("\tint ind=pol*" + str(numOutputs) + ";" + nl)
     if outputMode=="Vector":
         pass
-    else:
-        pass
+    else:#scalar output (no time)
+        ofc.write("\tfprint(fp,\""+fmtstr+"\"")
+        ofc.write(",pol")
+        for i in range(0,numOutputs):
+            ofc.write(","+"res["+("ind+" if individualOutput else "")+str(i)+"]")
+        ofc.write(");"+nl)
+        ofc.write("}\n")
 
 ofc.write("fclose(fp);"+nl)
 
