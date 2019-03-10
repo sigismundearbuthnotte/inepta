@@ -6,11 +6,12 @@
 #include <sstream>
 #include <stdlib.h>
 #include <cstdlib>
+#include <map>
 
 using namespace std;
 
-/*extern "C"*/ int readTable(const char* fileName,const char* baseSubdir, int numDims,int*dimSizes,int numBases,const char* bases[],int basisType,float **table,int*lb,const char *bo[]);
-extern "C" int readData(const char*fileName,const char* subdir,int numFields,int *intOrReal, int*arraySize,int *numPols,float **dataReal,int **dataInt);
+extern "C" int readTable(const char* fileName,const char* baseSubdir, int numDims,int*dimSizes,int numBases,const char* bases[],int basisType,float **table,int*lb,const char *bo[]);
+extern "C" int readData(const char*fileName,const char* subdir,int numFields,int *intOrReal,const char **enumInfo[], int numEnums,int*arraySize,int *numPols,float **dataReal,int **dataInt);
 extern "C" int readESG(const char*fileName,const char* subdir,int numScens,int numFields,int*numPeriods,float**scens);
 extern "C" void freeReals(float *p);
 extern "C" void freeInts(int *p);
@@ -186,8 +187,20 @@ int readTable(const char* fileName,const char* baseSubdir, int numDims,int*dimSi
     return 0;
 }
 
-int readData(const char*fileName,const char* subdir,int numFields,int *intOrReal, int*arraySize,int *numPols,float **dataReal,int **dataInt)
+int readData(const char*fileName,const char* subdir,int numFields,int *intOrReal,const char **enumInfo[], int numEnums, int*arraySize,int *numPols,float **dataReal,int **dataInt)
 {
+    //enum info placed in an array of maps
+    map<string,int> *enumMaps=new map<string,int> [numEnums];
+    for (int i=0;i<numEnums;++i)
+    {
+        int ec=0;
+        while (string(enumInfo[i][ec])!="endMarker")
+        {
+            enumMaps[i][string(enumInfo[i][ec])]=ec;
+            ec++;
+        }
+    }
+
     string fName,line,lTemp;
     ifstream inFile;
     istringstream l;
@@ -200,23 +213,18 @@ int readData(const char*fileName,const char* subdir,int numFields,int *intOrReal
     int numReal=0,numInt=0,numTot=0;
     for (int i=0;i<numFields;++i)
         numTot+=arraySize[i];
-    bool *intOrReal2;//the parameter does not allow for array length
-    intOrReal2=new bool[numTot];
+    int *intOrReal2;//the parameter does not allow for array length
+    intOrReal2=new int[numTot];
     int k=0;
     for (int i=0;i<numFields;++i)
-        if (intOrReal[i]==0)
-        {
+    {
+        if (intOrReal[i]!=1)
             numInt+=arraySize[i];
-            for (int j=0;j<arraySize[i];++j)
-                intOrReal2[k++]=true;
-        }
         else
-        {
             numReal+=arraySize[i];
-            for (int j=0;j<arraySize[i];++j)
-                intOrReal2[k++]=false;
-        }
-
+        for (int j=0;j<arraySize[i];++j)
+            intOrReal2[k++]=intOrReal[i];
+    }
     getline(inFile,line);
     (*numPols)=atoi(line.c_str());
     (*dataReal)=new float[(*numPols)*numReal];
@@ -232,12 +240,19 @@ int readData(const char*fileName,const char* subdir,int numFields,int *intOrReal
         for (int fld=0;fld<numTot;++fld)
         {
             ++k;
-            if (intOrReal2[k])
+            if (intOrReal2[k]==0)
                 l>>(*dataInt)[dataPosInt++];
-            else
+            else if (intOrReal2[k]==1)
                 l>>(*dataReal)[dataPosReal++];
+            else
+            {
+                string enumVal;
+                l>>enumVal;
+                (*dataInt)[dataPosInt++]=enumMaps[intOrReal2[k]-2][enumVal];//enums numbered from 2 to avoid clash with int and real
+            }
         }
     }
+    delete []enumMaps;
     return 0;
 }
 

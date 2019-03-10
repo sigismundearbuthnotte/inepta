@@ -1019,14 +1019,14 @@ def convCode(mi,ci,codeType,theCalls=[]):#print converted code and return the ex
                     if not ci2.isArrayed and ci2.stores!=-1:
                         #scalar (not s/a): only need to check for past values, could be a tuple
                         for past in range(1, ci2.stores + 1):
-                            for fld in ci.fieldsCalcd:
+                            for fld in ci2.fieldsCalcd:
                                 l = re.sub("[\W]" + fld + "__" + str(past) + "[\W]",lambda x: x.group()[0] + "as.state__" + str(past) + "." + fld + x.group()[len(fld + "__" + str(past)) + 1:],l)
                     if ci2.isArrayed and ci2.stores != -1:
                         #array (not s/a): check for past values and for implied array indices (1d only)
                         for past in range(1, ci2.stores + 1):
                             sp=str(past)
                             l = re.sub("[\W]" + ci2.name + "__" + sp + "[\W]",lambda x: x.group()[0] + "as.state__" + sp + "." + ci2.name + x.group()[len(ci2.name + "__" + sp) + 1:],l)
-                        l = re.sub("[\W]" + ci2.name + "[\W]",lambda x: (x.group() if (x.end()!=len(l)-1 and x.group()[-1]=="[")  else (x.group()[:-1]+"[i1]"+x.group()[-1])),l)
+                        l = re.sub("[\W]" + ci2.name + "[\W]",lambda x: (x.group() if (x.end()!=len(l)-1 and x.group()[-1]=="[")  else (x.group()[:-1]+("[i1]" if ci.isArrayed else "")+x.group()[-1])),l)
                     if ci2.stores==-1:
                         empty=False
                         ll=l#convert this but whittle it down as we get matches so as to avoid infinite loops matching the same thing over
@@ -1418,7 +1418,8 @@ for i in range(0,(2 if isDependent else 1)):#scen, inner scen
 #main function
 off.write(nl)
 off.write("let main ")
-off.write(" [numBases] ")
+if numActualBases>1:
+    off.write(" [numBases] ")
 for mi in modelInfos.values():#data files
     if mi.hasData:
         off.write(" [numPols"+("_"+mi.name if not isDependent else "")+"] ")
@@ -1623,7 +1624,7 @@ for mi in modelInfos.values():
     for (phName,ph) in mi.phases.items():
         if mi.phaseDirections[phName]!="static":
             off.write(nl)
-            off.write("let  runOnePeriod_"+mi.name+"_"+phName+("" if not isDependent else " (asTop:state_top_all)  (scen:oneScenInner) ")+" (as:state_"+mi.name+"_all)"+(" (storeAll:*[][]f32):" if haveAll else ":"))
+            off.write("let runOnePeriod_"+mi.name+"_"+phName+("" if not isDependent else " (asTop:state_top_all) ")+(" (scen:oneScen"+("Inner" if isDependent else "")+") " if hasESG else "")+" (as:state_"+mi.name+"_all)"+(" (storeAll:*[][]f32):" if haveAll else ":"))
             if haveAll:
                 off.write(" (state_"+mi.name+"_all,*[][]f32)="+nl)
             else:
@@ -1647,8 +1648,10 @@ for mi in modelInfos.values():
                 whoCallsWhom[ci.name] = iCall
             #write out calcs - but not __NR2 or __R2
             while whoCallsWhom != {}:
+                planted=False
                 for (caller, callees) in whoCallsWhom.items():
                     if callees == []:  # first calc with no ancestors
+                        planted=True
                         if not ph[caller].isWholeArray:#i.e. if ignore it's a __NR2
                             convCode(mi,ph[caller],CALCCODE)#write calc's code
                             off.write(nl)
@@ -1657,6 +1660,9 @@ for mi in modelInfos.values():
                                 l.remove(caller)
                         del whoCallsWhom[caller]
                         break
+                if not planted:
+                    doErr("Circular calculations",mi.name+" "+phName)
+
             #storage function
             off.write("let store (as:state_"+mi.name+"_all) "+("(storeAll:*[][]f32):" if haveAll else ":"))
             if haveAll:
@@ -1716,14 +1722,14 @@ for mi in modelInfos.values():
         if mi.phaseDirections[phName]!="static":
             off.write(nl)
             if haveAll:
-                off.write("let  runNPeriods_"+mi.name+"_"+phName+("" if not isDependent else " (asTop:state_top_all) (scen:oneScenInner) ")+" (n:i32) (as:state_"+mi.name+"_all) (storeAll:*[][]f32):")
+                off.write("let runNPeriods_"+mi.name+"_"+phName+("" if not isDependent else " (asTop:state_top_all) ")+("(scen:oneScen"+("Inner" if isDependent else "")+")" if hasESG else "")+" (n:i32) (as:state_"+mi.name+"_all) (storeAll:*[][]f32):")
                 off.write(" (state_" + mi.name + "_all,*[][]f32)=" + nl)
                 off.write("\tloop (as':state_"+mi.name+"_all,storeAll':*[][]f32)=\n")
                 off.write("\t(as,storeAll) for i<n do\n")
                 off.write("\trunOnePeriod_"+mi.name+"_"+phName+("" if not isDependent else " asTop scen")+" as' storeAll'"+nl)
             else:
-                off.write("let  runNPeriods_"+mi.name+"_"+phName+("" if not isDependent else " (asTop:state_top_all)  (scen:oneScenInner)")+" (n:i32) (as:state_"+mi.name+"_all):state_"+mi.name+"_all="+nl)
-                off.write("\t(iterate n (runOnePeriod_"+mi.name+"_"+phName+("" if not isDependent else " asTop scen) ")+") as"+nl)
+                off.write("let  runNPeriods_"+mi.name+"_"+phName+("" if not isDependent else " (asTop:state_top_all) ")+(" (scen:oneScen"+("Inner" if isDependent else "")+")" if hasESG else "")+" (n:i32) (as:state_"+mi.name+"_all):state_"+mi.name+"_all="+nl)
+                off.write("\t(iterate n (runOnePeriod_"+mi.name+"_"+phName+(" scen)" if not isDependent else " asTop scen) ")+") as"+nl)
 
 #functions to run N periods one policy, ONE scenario, get outputs.  Destined for use in inner stochastic runs.
 if isDependent:
@@ -1921,10 +1927,10 @@ for mi in modelInfosPlus.values():
 if not isDependent:
     # initialise either for phase0 or 1
     if haveAll:
-        off.write("let (init_as_pre_"+initPhase+",storeAll') = init_" + mi.name + "_"+initPhase+"_all zero_as"+(" scen " if hasESG else "")+" 0 storeAll \n")
-        off.write("let storeAll_pre_"+initPhase+" = init_" + mi.name + "_"+initPhase+"_storeAll  0 zero_as "+ (" scen " if hasESG else "")+" storeAll' \n")
+        off.write("let (init_as_pre_"+initPhase+",storeAll') = init_" + mi.name + "_"+initPhase+"_all zero_as_"+mi.name+(" scen " if hasESG else "")+" 0 storeAll \n")
+        off.write("let storeAll_pre_"+initPhase+" = init_" + mi.name + "_"+initPhase+"_storeAll  0 zero_as_"+mi.name+ (" scen " if hasESG else "")+" storeAll' \n")
     else:
-        off.write("let init_as_pre_"+initPhase+" = init_" + mi.name + "_"+initPhase+"_all init_as"+(" scen " if hasESG else "")+" 0 \n")
+        off.write("let init_as_pre_"+initPhase+" = init_" + mi.name + "_"+initPhase+"_all zero_as_"+mi.name+(" scen " if hasESG else "")+" 0 \n")
 
     #run phase 0, should it exist,  TODO; term is fixed: it runs to firstprojectionperiod
     if hasPhase0:
@@ -1975,13 +1981,13 @@ if not isDependent:
 
     #Run experience basis (phase1)- with rebasing
     if mi.dataFieldInfos[mi.termField].expression=="":
-        termBit="(pol."+mi.termField+"-"+mi.phaseStart["phase1"]+")"
+        termBit="(pol."+mi.termField+"-"+mi.phaseStart["phase1"]+"+1)"
     else:
-        termBit="(der."+mi.termField+"-"+mi.phaseStart["phase1"]+")"
+        termBit="(der."+mi.termField+"-"+mi.phaseStart["phase1"]+"+1)"
     if haveAll:
-        off.write("\nlet (as_post_phase1,storeAllPostphase1)=runExperience_"+mi.name+" init_as_pre_phase1 storeAllPostNR2 "+termBit+nl)
+        off.write("\nlet (as_post_phase1,storeAllPostphase1)=runExperience_"+mi.name+(" scen " if hasESG else "")+" init_as_pre_phase1 storeAllPostNR2 "+termBit+nl)
     else:
-        off.write("\nlet as_post_phase1=runExperience_"+mi.name+" "+termBit+" init_as_pre_phase1 "+nl)
+        off.write("\nlet as_post_phase1=runExperience_"+mi.name+" "+(" scen " if hasESG else "")+termBit+" init_as_pre_phase1 "+nl)
 
     #remaining phases
     phC=0
@@ -2044,23 +2050,23 @@ if not isDependent:
 
     #run one policy on all scenarios, for stochastic
     if isStochastic:
-        off.write("\nlet runOnePolAllScens_"+mi.name+" (scens:[]oneScen) (pol:data_"+mName+") (der:derived_"+mName+"):[]f32 ="+nl)
-        off.write("let allSimsResults:[][]f32=map (runOnePol_"+mi.name+" pol der) scens"+nl)
+        off.write("\nlet runOnePolAllScens_"+mi.name+" (scens:[]oneScen) (pol:data_"+mName+")"+(" (der:derived_"+mName+")" if mi.hasDerived else "")+":[]f32 ="+nl)
+        off.write("let allSimsResults:[][]f32=map (runOnePol_"+mi.name+" pol"+(" der" if mi.hasDerived else "")+") scens"+nl)
         off.write("let sumSims = reduce (+.+) (zeros1 numOutputs) allSimsResults"+nl)
         off.write("in map (/numScens) sumSims\n")
 
     #batches of policies, if required
     if mi.batchSizeInternal>0:
         off.write("\nlet batchSize:i32="+str(mi.batchSizeInternal)+nl)
-        off.write("let numBatches=if numPols%%batchSize==0 then (numPols//batchSize) else (numPols//batchSize+1)\n")
+        off.write("let numBatches=if numPols_"+mi.name+"%%batchSize==0 then (numPols_"+mi.name+"//batchSize) else (numPols_"+mi.name+"//batchSize+1)\n")
         off.write("let "+("sum" if not individualOutput else "concat")+"OfBatches=\n")
         if not individualOutput:
             off.write("\tloop sumOfBatches':"+("[]" if outputMode=="VECTOR" else "")+"[][]f32=(zeros"+("3" if outputMode=="VECTOR" else "2")+" batchSize "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" for i<numBatches do\n")
         else:
             off.write("\tloop concatOfBatches':"+("[]" if outputMode=="VECTOR" else "")+"[][]f32=[] for i<numBatches do\n")
         off.write("\tlet lo=i*batchSize\n")
-        off.write("\tlet hi=mini ((i+1i32)*batchSize) numPols\n")
-        off.write("\tlet batchRes = map2 (runOnePol"+("AllScens" if isStochastic else "")+"_"+mName+(" scens"+("[0]"if not isStochastic else "")+")" if hasESG else ")")+" fileData_"+mName+"[lo:hi] derived_"+mName+"[lo:hi]\n")
+        off.write("\tlet hi=mini ((i+1i32)*batchSize) numPols_"+mi.name+nl)
+        off.write("\tlet batchRes = map"+("2" if mi.hasDerived else "")+" (runOnePol"+("AllScens" if isStochastic else "")+"_"+mName+(" scens"+("[0]"if not isStochastic else "")+")" if hasESG else ")")+" fileData_"+mName+"[lo:hi]"+( "derived_"+mName+"[lo:hi] " if mi.hasDerived else "")+nl)
         if not individualOutput:
             off.write("\tin sumOfBatches' +." + ("." if outputMode == "VECTOR" else "") + ".+ batchRes\n")
             off.write("in reduce (+."+("." if outputMode=="VECTOR" else "")+"+) (zeros"+("2" if outputMode=="VECTOR" else "1")+" "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" sumOfBatches\n")
@@ -2516,6 +2522,21 @@ for mi in modelInfosPlus.values():
         ofc.write(");\n")
         ofc.write("struct futhark_i32_1d *fut_"+"lb_"+k+"_"+mi.name+"=futhark_new_i32_1d(ctx,"+"lb_"+k+"_"+mi.name+",2);"+nl)
 
+# enum info for data read
+ofc.write("const char **enumInfo[" + str(enums.__len__()) + "];" + nl)
+enumCount = 2
+enumNum = {}
+for (enumName, enum) in enums.items():
+    enumNum[enumName] = enumCount
+    ofc.write("const char *enumVals" + str(enumCount) + "[]={")
+    comma = ""
+    for (k, v) in enum.items():
+        ofc.write(comma + "\"" + k + "\"")
+        comma = ","
+    ofc.write(",\"endMarker\"};" + nl)
+    ofc.write("enumInfo[" + str(enumCount-2) + "]=enumVals" + str(enumCount) + ";" + nl)
+    enumCount += 1
+
 #read data and create futhark data arrays
 ofc.write("int numPols;\n")
 dataFiles=[]
@@ -2535,7 +2556,12 @@ for mi in modelInfos.values():
         comma=""
         for df in mi.dataFieldInfos.values():
             if df.expression=="":
-                ofc.write(comma+("1" if df.type=="real" else "0"))
+                if df.type=="real":
+                    ofc.write(comma+"1")
+                elif df.type=="int":
+                    ofc.write(comma+"0")
+                else:
+                    ofc.write(comma+str(enumNum[df.type]))
                 comma=","
         ofc.write("};\n")
         ofc.write("int arraySize_"+mi.name+"["+str(numDF)+"]={")
@@ -2545,7 +2571,7 @@ for mi in modelInfos.values():
                 ofc.write(comma+("1" if df.arraySize==0 else str(df.arraySize)))
                 comma=","
         ofc.write("};\n")
-        ofc.write("err=readData(\""+dataSubDir+"/data_"+mi.name+"\",\"\","+str(numDF)+",intOrReal_"+mi.name+",arraySize_"+mi.name+",&numPols,&fileDataReal_"+mi.name+",&fileDataInt_"+mi.name+");\n")
+        ofc.write("err=readData(\""+dataSubDir+"/data_"+mi.name+"\",\"\","+str(numDF)+",intOrReal_"+mi.name+",enumInfo,"+str(enums.__len__())+",arraySize_"+mi.name+",&numPols,&fileDataReal_"+mi.name+",&fileDataInt_"+mi.name+");\n")
         dataFiles=dataFiles.__add__(["fileDataInt_"+mi.name])
         dataFiles=dataFiles.__add__(["fileDataReal_"+mi.name])
         ofc.write("struct futhark_i32_2d *fut_fileDataInt_"+mi.name+"=futhark_new_i32_2d(ctx,fileDataInt_"+mi.name+",numPols,"+str(numDFInt)+");"+nl)
