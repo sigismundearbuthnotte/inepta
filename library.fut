@@ -21,6 +21,7 @@ let maxi=i32.max
 let maxr=f32.max
 let mini=i32.min
 let minr=f32.min
+let (%/) = (//) --as // is a comment
 
 --constants
 let zeros1(s:i32):[]f32=
@@ -41,6 +42,9 @@ let undef2 (s1:i32) (s2:i32) :[][]f32=
 let (*.) (x:f32) (y:[]f32) = map (x*) y
 let (+.) (x:f32) (y:[]f32) = map (x+) y
 let (-.) (x:f32) (y:[]f32) = map (x-) y
+let (*%) (x:i32) (y:[]i32) = map (x*) y
+let (+%) (x:i32) (y:[]i32) = map (x+) y
+let (-%) (x:i32) (y:[]i32) = map (x-) y
 
 --scalar + matrix
 let (*..) (x:f32) (y:[][]f32) = map (map (x*)) y
@@ -51,6 +55,10 @@ let (+.+) (x:[]f32) (y:[]f32) = map2 (+) x y
 let (-.-) (x:[]f32) (y:[]f32) = map2 (-) x y
 let (*.*) (x:[]f32) (y:[]f32) = map2 (*) x y
 let (/./) (x:[]f32) (y:[]f32) = map2 (/) x y
+let (+%+) (x:[]i32) (y:[]i32) = map2 (+) x y
+let (-%-) (x:[]i32) (y:[]i32) = map2 (-) x y
+let (*%*) (x:[]i32) (y:[]i32) = map2 (*) x y
+let (/%/) (x:[]i32) (y:[]i32) = map2 (/) x y
 
 --two matrices
 let (+..+) (x:[][]f32) (y:[][]f32) = map2 (map2 (+)) x y

@@ -131,6 +131,7 @@ class calcInfoObject:
         self.isConstant=False
         self.isInnerScenarios=False
         self.description=""#mainly used in error messages
+        self.returnsArray=False#used where there's an array formula (e.g. scan)
 
 class basisInfoObject:#might be OTT
     def __init__(self):
@@ -306,6 +307,11 @@ def readBasicModelInfo(mfn):
                             ci.dimSizes = [(lambda x: int(x) if x.isnumeric() else (
                             numNonRebased if x=="NR" else numRebased))(lll) for lll in ll[1:]]
                             ci.type = ll[0]
+                            if ci.type!="real" and ci.type!="int":
+                                doErr("Unknown type for calc: ",l)
+                        elif lsu[i+1].__contains__("()"):
+                            ci.returnsArray=True
+                            ci.type = ls[i + 1].replace("(","").replace(")","")
                             if ci.type!="real" and ci.type!="int":
                                 doErr("Unknown type for calc: ",l)
                         else:
@@ -1281,6 +1287,8 @@ for mi in modelInfosPlus.values():
                     brackets = ""
                     for i in range(0, ci.numDims):
                         brackets = brackets + "[" + str(ci.dimSizes[i]) + "]"
+                    if ci.returnsArray:
+                        brackets="[]"
                     for fld in ci.fieldsCalcd:
                         off.write(comma + fld + ":" + brackets + typ + nl)
                         comma = ","
@@ -1870,7 +1878,10 @@ for mi in modelInfosPlus.values():
                 if ci.stores > 0 or (ci.isOutput and outputMode=="SCALAR") or ci.isConstant:
                     for fld in ci.fieldsCalcd:
                         if not ci.isArrayed:
-                            off.write(comma+fld+"=0\n")
+                            if not ci.returnsArray:
+                                off.write(comma+fld+"=0\n")
+                            else:
+                                off.write(comma+fld+"=[]"+nl)
                         else:
                             off.write(comma+fld+"=zeros"+("i" if ci.type=="int" else "")+str(ci.numDims)+" "+"".join([str(i)+" " for i in ci.dimSizes])+nl)
                         comma = ","
@@ -2075,7 +2086,7 @@ if not isDependent:
             off.write("in concatOfBatches"+nl)
     else:
         off.write(nl)
-        off.write("let res = map2 (runOnePol"+("AllScens" if isStochastic else "")+"_"+mName+(" scens"+("[0]"if not isStochastic else "")+")" if hasESG else ")")+" fileData_"+mName+" derived_"+mName+nl)
+        off.write("let res = map"+("2" if mi.hasDerived else "")+ "(runOnePol"+("AllScens" if isStochastic else "")+"_"+mName+(" scens"+("[0]"if not isStochastic else "")+")" if hasESG else ")")+" fileData_"+mName+(" derived_"+mName if mi.hasDerived else "")+nl)
         if not individualOutput:
             off.write("in reduce (+."+("." if outputMode=="VECTOR" else "")+"+) (zeros"+("2" if outputMode=="VECTOR" else "1")+" "+str(numOutputs)+(" numPeriods)" if outputMode=="VECTOR" else ")")+" res\n")
         else:
