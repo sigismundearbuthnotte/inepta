@@ -35,7 +35,7 @@ allowablecalcSettings=set(calcSettings.keys())
 allowablePhaseSettings=set(["NAME","DIRECTION","START","TERM"])
 allowableDirections=set(["FORWARDS","BACKWARDS","STATIC"])
 allowableTableBases=set(["SINGLE","PREFIX","SUFFIX","SUBDIR"])
-allowableTopSections=set(["BASIC","BASES","SUBBASE","REBASING","MODELS","END"])
+allowableTopSections=set(["BASIC","BASES","SUBBASE","REBASING","MODELS","END","COMPILATION"])
 CALCCODE=0
 INITIALISATION=1
 GLOBALFN=2
@@ -63,6 +63,7 @@ innerModelCalls={}#name->inner model call object
 errorInfos={}#line number (of generated code)->errorInfo object
 currentCalcInfoObject=None#for error info
 currentCalcLine=0
+compilationFlags=set()
 
 #classes
 class modelInfo(object):#persistent data for a model
@@ -249,7 +250,21 @@ def readBasicModelInfo(mfn):
     mi=modelInfo()
     ift = open(mfn, 'r')
     section=""
+    ignoreLines=False
     for l in ift.readlines():
+        if l[:6]=="#ifdef":
+            flag=l[6:].strip()
+            ignoreLines=not compilationFlags.__contains__(flag)
+            continue
+        if l[:7]=="#ifndef":
+            flag=l[7:].strip()
+            ignoreLines=compilationFlags.__contains__(flag)
+            continue
+        if l[:6]=="#endif":
+            ignoreLines=False
+            continue
+        if ignoreLines:
+            continue
         (ls, c,lsu) = nwscap(l, "=:,;")
         if c:
             if ls[0][0] == "[":
@@ -566,6 +581,8 @@ for l in ift.readlines():
             else:
                 sbVals[sbName]=sbVals[sbName].__add__([ls[0]])
             continue
+        if section=="COMPILATION":
+            compilationFlags.add((l if l[-1]!="\n" else l[:-1]))
         if section=="MODELS":
             modelInfos[ls[0]]=readBasicModelInfo(modelSubDir + "/" + ls[0] + ".model")
             if modelInfos[ls[0]].name=="top":#will not keep topModel with others
@@ -946,6 +963,45 @@ def convCode(mi,ci,codeType,theCalls=[]):#print converted code and return the ex
                         break#only do one occurence as changing the string
                     if doCalls:
                         break#as doing only 1 occurence
+        for (esgFld,esgDims) in mi.esg.items():#add implicit t to scenario access
+            findPos=0
+            fld="scen."+esgFld
+            while True:
+                findPos = l.find(fld, findPos)
+                if findPos < 0:
+                    break  # next field
+                findPos += len(fld)
+                if findPos<=len(l)-1 and l[findPos].isalnum():#as only using find, might pick up prefix of another field
+                    continue#wasnae me
+                if l[findPos:findPos+3]=="[t]":
+                    continue
+                if esgDims==[1] and findPos<=len(l)-1 and l[findPos]!="[":
+                    l=l[:findPos]+"[t]"+l[findPos:]
+                    continue
+                else:
+                    parLevel = 1
+                    brLevel = 1
+                    findPos+=1
+                    pos = findPos
+                    commaCount=0#find commas at ( and [ level 0
+                    while True:  # scan forward, look for bracket-level-0 (not the brackets of this table itself but any in index-expressions)
+                        if l[pos] == "[":
+                            brLevel += 1
+                        if l[pos] == "]":
+                            brLevel -= 1
+                        if l[pos] == "(":
+                            parLevel += 1
+                        if l[pos] == ")":
+                            parLevel -= 1
+                        if brLevel==0:
+                            break
+                        if parLevel == 1 and brLevel == 1 and l[pos] == ",":
+                            commaCount+=1
+                            break
+                        pos += 1
+                    if commaCount<len(esgDims):
+                        l = l[:findPos] + "t," + l[findPos:]
+                        continue
         for kt in mi.tableInfos.keys():  # convert table name to name of parameter of main
             l = re.sub("[\W]" + kt + "[\W]",lambda x: x.group()[0] + "table_" + kt + "_" + mi.name + x.group()[len(kt) + 1:], l)
         for (kt,vt) in mi.tableInfos.items():  # add basis index, if required
@@ -2298,20 +2354,20 @@ if isDependent:
             if tempASCount>1:
                 off.write(str(tempASCount-1))
             call=theCalls[i_call]
-            if i_phase>=1:#in case call right at start
-                for ci in thePhases[i_phase-1].values():#incorporate the changes in the last pseudo-phase
-                    if ci.stores>0:
-                        for fld in ci.fieldsCalcd:
-                            off.write(" with state__1."+fld+"="+fld)
-            off.write(" with Call__=Call__"+call.name+" with Call__t=t+1")
-            off.write(nl)
-            anyCount+=1
-            off.write("let whenExpr"+str(anyCount)+":bool="+call.when+nl)
             stateInput=call.stateInput
             if stateInput[-3:]=="__1":
                 stateInput="as.state__1."+stateInput[:-3]
             else:
                 stateInput=stateInput+"_state"
+            if i_phase>=1:#in case call right at start
+                for ci in thePhases[i_phase-1].values():#incorporate the changes in the last pseudo-phase
+                    if ci.stores>0:
+                        for fld in ci.fieldsCalcd:
+                            off.write(" with state__1."+fld+"="+fld)
+            off.write(" with Call__=Call__"+call.name+" with Call__t="+stateInput+"[0].t")
+            off.write(nl)
+            anyCount+=1
+            off.write("let whenExpr"+str(anyCount)+":bool="+call.when+nl)
             off.write("let termExpr"+str(anyCount)+"=if whenExpr"+str(anyCount)+" then (map (.state__1."+call.term+") "+stateInput+") else ([])"+nl)#lambda to calculate term from a calc in the state
             if not call.isStochastic:
                 off.write("let "+call.name+"_state=if whenExpr"+str(anyCount)+" then ")
