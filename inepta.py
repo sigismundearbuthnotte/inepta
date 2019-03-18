@@ -976,7 +976,7 @@ def convCode(mi,ci,codeType,theCalls=[]):#print converted code and return the ex
                 if l[findPos:findPos+3]=="[t]":
                     continue
                 if esgDims==[1] and findPos<=len(l)-1 and l[findPos]!="[":
-                    l=l[:findPos]+"[t]"+l[findPos:]
+                    l=l[:findPos]+"[t-1]"+l[findPos:]
                     continue
                 else:
                     parLevel = 1
@@ -1000,7 +1000,7 @@ def convCode(mi,ci,codeType,theCalls=[]):#print converted code and return the ex
                             break
                         pos += 1
                     if commaCount<len(esgDims):
-                        l = l[:findPos] + "t," + l[findPos:]
+                        l = l[:findPos] + "t-1," + l[findPos:]
                         continue
         for kt in mi.tableInfos.keys():  # convert table name to name of parameter of main
             l = re.sub("[\W]" + kt + "[\W]",lambda x: x.group()[0] + "table_" + kt + "_" + mi.name + x.group()[len(kt) + 1:], l)
@@ -1290,8 +1290,8 @@ for mi in modelInfos.values():
                 dataFieldsReal += df.name + "=["
                 comma=""
                 for i in range(0,df.arraySize):
-                    dataFieldsReal +=comma+"y["+str(countInt)+"]"
-                    countInt += 1
+                    dataFieldsReal +=comma+"y["+str(countReal)+"]"
+                    countReal += 1
                     comma=","
                 dataFieldsReal += "],"
     dataFieldsReal=dataFieldsReal[0:len(dataFieldsReal)-1]
@@ -1571,8 +1571,8 @@ off.write(nl)
 for mi in modelInfosPlus.values():
     for t in mi.tableInfos.values():
         if t.dim2HasLB or t.dim1HasLB:
-            off.write("let lb_"+t.name+"_"+mi.name+"_1="+(" lb_"+t.name+"_"+mi.name+"[0]" if t.dim2HasLB else "0i32")+nl)
-            off.write("let lb_"+t.name+"_"+mi.name+"_2="+(" lb_"+t.name+"_"+mi.name+"[1]" if t.dim1HasLB else "0i32")+nl)
+            off.write("let lb_"+t.name+"_"+mi.name+"_1="+(" lb_"+t.name+"_"+mi.name+"[0]" if t.dim1HasLB else "0i32")+nl)
+            off.write("let lb_"+t.name+"_"+mi.name+"_2="+(" lb_"+t.name+"_"+mi.name+"[1]" if t.dim2HasLB else "0i32")+nl)
 off.write(nl)
 
 #get data
@@ -2732,7 +2732,7 @@ ofc.write("futhark_context_config_free(cfg);\n")
 ofc.write("FILE *fp;\n")
 ofc.write("fp=fopen(\""+outputSubDir+"/futhark.out\",\"w\");"+nl)
 fmtstr="%s         "*len(outputNames)
-ofc.write("fprint(fp,\""+("Policy" if not isDependent and individualOutput else "")+("Scenario" if isDependent and not averageOverScenarios else "")+fmtstr+"\","+",".join(outputNames)+");"+nl)
+ofc.write("fprintf(fp,\""+("Policy" if not isDependent and individualOutput else "")+("Scenario" if isDependent and not averageOverScenarios else "")+fmtstr+"\","+",".join(outputNames)+");"+nl)
 fmtstr=("%d         " if isDependent and not averageOverScenarios or not isDependent and individualOutput else "")+"%f         "*len(outputNames)
 if isDependent:
     if averageOverScenarios:
@@ -2743,7 +2743,7 @@ if isDependent:
     else:#individual (outer) scenarios
         ofc.write("for (int scen=0;scen<"+str(numScens)+";++scen){"+nl)
         ofc.write("\tint ind=scen*"+str(numOutputs)+";"+nl)
-        ofc.write("\tfprint(fp,\""+fmtstr+"\"")
+        ofc.write("\tfprintf(fp,\""+fmtstr+"\"")
         ofc.write(",scen")
         for i in range(0,numOutputs):
             ofc.write(","+"res[ind+"+str(i)+"]")
@@ -2756,12 +2756,14 @@ else:#independent
     if outputMode=="Vector":
         pass
     else:#scalar output (no time)
-        ofc.write("\tfprint(fp,\""+fmtstr+"\"")
-        ofc.write(",pol")
+        ofc.write("fprintf(fp,\""+fmtstr+"\"")
+        if individualOutput:
+            ofc.write(",pol")
         for i in range(0,numOutputs):
             ofc.write(","+"res["+("ind+" if individualOutput else "")+str(i)+"]")
         ofc.write(");"+nl)
-        ofc.write("}\n")
+        if individualOutput:
+            ofc.write("}\n")
 
 ofc.write("fclose(fp);"+nl)
 

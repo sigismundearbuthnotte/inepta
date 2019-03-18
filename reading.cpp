@@ -21,6 +21,16 @@ const int basisPrefix=2;
 const int basisSuffix=3;
 const int basisSubdir=4;
 
+void findReplace(string &ssearch,const string &sfind,const string &sreplace)
+{
+    size_t fpos=0;
+    while ((fpos=ssearch.find(sfind,fpos))!=string::npos)
+    {
+        ssearch.replace(fpos,sfind.length(),sreplace);
+        fpos+=sreplace.length();
+    }
+}
+
 int readTable(const char* fileName,const char* baseSubdir, int numDims,int*dimSizes,int numBases,const char* bases[],int basisType,float **table,int*lb,const char *bo[])
 {
     string fName,line,lTemp;
@@ -134,7 +144,7 @@ int readTable(const char* fileName,const char* baseSubdir, int numDims,int*dimSi
             getline(inFile,line);
             if (line[0]=='~')
                 blockHeader=line;
-            while (line[0]=='~'||line[0]=='*')
+            while (line[0]!='~'||line[0]=='*')
             {
                 getline(inFile,line);
                 if (line[0]=='~')
@@ -145,9 +155,9 @@ int readTable(const char* fileName,const char* baseSubdir, int numDims,int*dimSi
             int posnInBO;
             if (blockHeader!="" and numBlocks>1)
             {
-                blockHeader=blockHeader.replace(blockHeader.begin(),blockHeader.end()," ","");
-                blockHeader=blockHeader.replace(blockHeader.begin(),blockHeader.end(),"~","");
-                blockHeader=blockHeader.replace(blockHeader.begin(),blockHeader.end(),"+"," ");
+                findReplace(blockHeader," ","");
+                findReplace(blockHeader,"~","");
+                findReplace(blockHeader,"+","");
                 istringstream iss(blockHeader);
                 for (posnInBO=1;posnInBO<=numBlocks;++posnInBO)//there's a dummy "" at the start of bo
                 {
@@ -172,12 +182,12 @@ int readTable(const char* fileName,const char* baseSubdir, int numDims,int*dimSi
                 tablePos=basis*numBlocks*numLines*lineLength+posnInBO*numLines*lineLength;//start of block allowing for order
             for (int ll=0;ll<numLines;++ll)
             {
+                getline(inFile,line);
                 l.clear();
                 l.str(line);
                 l>>lTemp;
                 for (int col=0;col<lineLength;++col)
                     l>>(*table)[tablePos++];
-                getline(inFile,line);
             }
         }
 
