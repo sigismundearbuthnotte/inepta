@@ -1,0 +1,239 @@
+[basic]
+name=va
+term=termOS
+firstProjectionPeriod=1
+lastProjectionPeriod=600
+batchSizeExternal=1000000
+batchSizeInternal=0
+[end]
+
+[esg]
+fundReturn[10]
+annuityDiscountRate
+[end]
+
+[data]
+recordID:int
+sex:gender
+productType:product
+ageYears_d:int
+ageMonths_d:int
+baseFee_d:real
+riderFee_d:real
+rollUpRate:real
+gbAmt_d:real
+gmwbBalance_d:real
+wbWithdrawalRate:real
+withdrawal:real
+numFunds:int
+fundCode:fund[10]
+fundValue:real[10]
+fundFee:real[10]
+termOS:int
+elapsedMonths:int
+termToNextRenewal:int
+renewalTerm:int
+gteedAnnFac:real
+[end]
+
+[derived]
+[end]
+
+[common]
+valYear=2018i32
+valMonth=12i32
+shortRate=0.02f32
+discFacMonth=exp(-shortRate/12)
+[end]
+
+[phase]
+name=phase1
+start=firstProjectionPeriod
+
+###constant,type=int
+hasIB=
+return if productType==DBIB||productType==IBRP||productType==IBRU||productType==IBSU then 1 else 0
+
+###constant,type=int
+hasDeathBen=
+return if productType==DBAB||productType==DBIB||productType==DBMB||productType==DBRP||productType==DBRU||productType==DBSU||productType==DBWB then 1 else 0
+
+###constant,type=int
+hasLivingBen=
+return if productType==ABRP||productType==ABRU||productType==ABSU||productType==DBAB then 1 else 0
+
+###constant,type=int
+hasWithdrawalBen=
+return if productType==DBWB||productType==WBRP||productType==WBRU||productType==WBSU then 1 else 0
+
+###constant,type=int
+hasMatyBen=
+return if productType==MBSU||productType==MBRU||productType==MBRP||productType==DBMB then 1 else 0
+
+###constant
+rollupMonthly=
+return (1+rollUpRate)**(1.0/12.0)
+
+###type=int,store=1
+initialise=elapsedMonths%%12
+termIFMonths=
+return if termIFMonths__1==11 then 0 else termIFMonths__1+1
+
+###type=real[10;numFunds]
+fundAfterGrowth=
+return fundCF__1*scen.fundReturn[fundCode]*(1-fundFee/12)
+
+###type=real[10;numFunds]
+riderFee=
+return fundAfterGrowth*riderFee_d/12
+
+###type=real[10;numFunds]
+baseFee=
+return fundAfterGrowth*baseFee_d/12
+
+###type=real[10;numFunds]
+fundAfterRiskFees=
+return fundAfterGrowth-baseFee-riderFee
+
+###type=real[10;numFunds]
+fundAfterGB=
+return fundAfterRiskFees*accountValueAfterGB/(accountValueBeforeGB+0.0000001f32)
+
+###store=1,type=real[10;numFunds]
+initialise=fundValue
+fundCF=
+return fundAfterGB*(1-qx)
+
+###type=int,store=1
+initialise=termToNextRenewal
+termOSToRenewal=
+return if hasLivingBen==0 then 1200 else if termOSToRenewal__1 == 1 then renewalTerm else termOSToRenewal__1-1
+
+###
+accountValueBeforeGB=
+return sum fundAfterRiskFees[:numFunds]
+
+###
+accountValueAfterGB=
+return maxr(0,accountValueBeforeGB+livingBen-wdlAmt)
+
+###
+deathBen=
+res= if hasDeathBen==0 then 0 else 
+if hasWithdrawalBen==0 then maxr(0,gbAmt-accountValueBeforeGB)*qx
+else maxr(0,gmwbBalance__1-wdlAmt-accountValueBeforeGB)*qx
+return res
+
+###store=1
+initialise=1
+discFac=
+return discFac__1*discFacMonth
+
+###
+gbAmt=
+res=
+    if productType==ABRP then if termOSToRenewal__1 == 1 then maxr(gbAmtCF__1,accountValueBeforeGB) else gbAmtCF__1
+    else if productType==DBIB||productType==DBMB||productType==DBSU||productType==DBWB||productType==IBSU||productType==MBSU||productType==WBSU then if termIFMonths==0 then maxr(gbAmtCF__1,accountValueBeforeGB) else gbAmtCF__1
+    else if productType==ABRU then if termOSToRenewal__1 == 1 then maxr(gbAmtCF__1*rollupMonthly,accountValueBeforeGB) else gbAmtCF__1*rollupMonthly
+    else if productType==ABSU||productType==DBAB then if termIFMonths==0||termOSToRenewal__1==1 then maxr(gbAmtCF__1,accountValueBeforeGB) else gbAmtCF__1
+    else if productType==DBRP||productType==IBRP||productType==MBRP||productType==WBRP then gbAmt_d*survCF__1
+    else if productType==DBRU||productType==IBRU||productType==MBRU||productType==WBRU then gbAmtCF__1*rollupMonthly
+    else 0
+return res
+
+###
+wdlAmt=
+res= if hasWithdrawalBen==0 then 0 else 
+if t<termOS then if termIFMonths!=0 then 0 else minr(wbWithdrawalRate*gbAmt,gmwbBalance__1) 
+else gmwbBalance__1
+return res
+
+###
+wdlBen=
+return if hasWithdrawalBen==0 then 0 else maxr(0,wdlAmt-accountValueBeforeGB)
+
+###store=1
+initialise=gmwbBalance_d
+gmwbBalance=
+return (gmwbBalance__1-wdlAmt)*(1-qx)
+
+###store==1
+initialise=gbAmt_d
+gbAmtCF=
+return gbAmt*(1-qx)
+
+###
+livingBen=
+res=if hasLivingBen==0 then 0 else 
+    if termOSToRenewal__1 == 1 then maxr(0,gbAmt-accountValueBeforeGB)*(1-qx) else 0
+return res
+
+###
+matyBen=
+res=if hasMatyBen==0 then 0 else 
+if t==termOS then maxr(0,gbAmt-accountValueBeforeGB)*(1-qx) else 0
+return res
+
+###constant,type=real()   //but would not do this for stochastic mortality
+//###
+annSurv=
+res=if !(productType==DBIB||productType==IBRP||productType==IBRU||productType==IBSU) then [] else
+    matYear=(valYear*12+valMonth+termOS)%/12
+    matMonth=(valYear*12+valMonth+termOS)%%12
+    prop=(real matMonth)/12f32
+    calYrs=matYear +% (iota 54)
+    ageMat=(ageYears_d*12+ageMonths_d+termOS)%/12
+    ages=ageMat+%(iota 54)//assumed exact at retirement
+    pxs1=map2 (\x y-> 1-va_mort_post_retirement[sex,x,y]) ages calYrs
+    pxs2=map2 (\x y-> 1-va_mort_post_retirement[sex,x,y+1]) ages calYrs
+    pxs=(map (**(1-prop)) pxs1) *.* (map (**prop) pxs2)
+    in [1f32]++(scan (*) 1 pxs)
+return res
+
+###
+mktAnnFac=
+res=if hasIB==0||t!=termOS then 0 else
+(1+scen.annuityDiscountRate)*sumprod( (scan (*) 1f32 (replicate 55 (1/(1+scen.annuityDiscountRate))) ), annSurv)
+return res
+
+###
+incomeBen=
+res=if hasIB==0 then 0 else 
+if t==termOS then maxr(0,gbAmtCF*mktAnnFac/gteedAnnFac-accountValueBeforeGB*(1-qx)) else 0
+return res
+
+###
+qx=
+return 1-(1-va_mort_pre_retirement[ageYears,sex])**(1f32/12f32)
+
+###store=1
+initialise=1
+survCF=
+return survCF__1*(1-qx)
+
+###store=1,type=int
+initialise=ageMonths_d
+ageMonths=
+am0=ageMonths__1+1
+return if am0<=11 then am0 else 0
+
+###store=1,type=int
+initialise=ageYears_d
+ageYears=
+return if ageMonths!=0 then ageYears__1 else ageYears__1+1
+
+###
+fees=
+return sum (riderFee+.+baseFee)
+
+###store=1,output
+initialise=0
+pvCOG=
+return pvCOG__1+discFac*(livingBen*(1-qx)+deathBen+incomeBen+wdlBen+matyBen-fees)
+
+[end]
+
+[tables]
+name=va_mort_pre_retirement,basis=single,dims=(int0,int0)
+name=va_mort_post_retirement,basis=single,dims=(gender,int0,int)
+[end]

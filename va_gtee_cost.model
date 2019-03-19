@@ -1,0 +1,16 @@
+[basic]
+mode=independent
+output=scalar
+stochastic=true
+numScenarios=10
+numInnerScenarios=0
+file=scens.txt
+[end]
+[bases]
+Experience
+[end]
+[compilation]
+[end]
+[models]
+va
+[end]
