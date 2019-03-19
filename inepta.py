@@ -64,6 +64,7 @@ errorInfos={}#line number (of generated code)->errorInfo object
 currentCalcInfoObject=None#for error info
 currentCalcLine=0
 compilationFlags=set()
+sizemaxs=set()
 
 #classes
 class modelInfo(object):#persistent data for a model
@@ -324,6 +325,8 @@ def readBasicModelInfo(mfn):
                             ci.type = ll[0]
                             if ci.type!="real" and ci.type!="int":
                                 doErr("Unknown type for calc: ",l)
+                            if ci.sizeMax!="":
+                                sizemaxs.add(ci.dimSizes[0])
                         elif lsu[i+1].__contains__("()"):
                             ci.returnsArray=True
                             ci.type = ls[i + 1].replace("(","").replace(")","")
@@ -624,6 +627,10 @@ for l in ift.readlines():
                 (rebaseTimes,_,_) = nwscap(ll,",")
             if not l.__contains__(","):
                 print("Warning: No commas in rebase times.  Is this the intention?")
+
+#zero vectors for extending variable size array calcs to fixed size
+for i in sizemaxs:
+    off.write("let vec__"+str(i)+"=replicate "+str(i)+" 0f32"+nl)
 
 #in certain cases we might want to process the top model with the others
 modelInfosPlus=modelInfos.copy()
@@ -1733,12 +1740,16 @@ for mi in modelInfos.values():
                 off.write(" (state_" + mi.name + "_all,*[][]f32)=" + nl)
             else:
                 off.write(" state_" + mi.name + "_all=" + nl)
+            for ci in ph.values():#extend arrays that have a sizeMax so that all arrays are irregular (else the compiler bombs out)
+                if ci.stores >= 1 and ci.sizeMax!="":
+                    off.write("let "+ci.name+"__extended=copy vec__"+str(ci.dimSizes[0])+nl)
+                    off.write("let "+ci.name + "__extended[:as.p."+ci.sizeMax+"]="+ci.name+nl)
             for i in range(mi.maxStored ,0,-1):#stored states
                 off.write("let state__"+str(i)+"=as.state__"+str(i))
                 for ci in ph.values():
                     if ci.stores >= i or (i==1 and ci.isOutput and outputMode=="SCALAR"):
                         for fld in ci.fieldsCalcd:
-                            off.write(" with "+fld+"="+("as.state__"+str(i-1)+"." if i>1 else "")+fld)
+                            off.write(" with "+fld+"="+("as.state__"+str(i-1)+"." if i>1 else "")+fld+("__extended" if ci.sizeMax!="" else ""))
                 off.write(nl)
             off.write("let asNew=as "+nl)#new all-state
             for i in range(1, mi.maxStored + 1):
@@ -2667,7 +2678,7 @@ else:
 #call futhark (incl.timing)
 ofc.write("struct timespec startTime,endTime;\n")
 ofc.write("clock_gettime(CLOCK_PROCESS_CPUTIME_ID,&startTime);\n")
-
+ofc.write("printf(\"Starting call to GPU...\");"+nl)
 ofc.write("int futErr=futhark_entry_main(ctx,&fut_Res,"+(" fut_scens " if hasESG else "")+",")
 for dfl in dataFiles:
     ofc.write("fut_"+dfl+",")
@@ -2764,7 +2775,8 @@ else:#independent
         ofc.write(");"+nl)
         if individualOutput:
             ofc.write("}\n")
-
+ofc.write("printf(\"Returned from GPU\");"+nl)
+ofc.write("fprintf(fp,\"Time taken for call to GPU: %f seconds\",diffTime);"+nl)
 ofc.write("fclose(fp);"+nl)
 
 ofc.write("\nreturn 0;\n")

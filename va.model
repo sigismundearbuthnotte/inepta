@@ -177,7 +177,7 @@ return res
 ###constant,type=real()   //but would not do this for stochastic mortality
 //###
 annSurv=
-res=if !(productType==DBIB||productType==IBRP||productType==IBRU||productType==IBSU) then [] else
+res=if !(productType==DBIB||productType==IBRP||productType==IBRU||productType==IBSU) then (zeros1 55) else
     matYear=(valYear*12+valMonth+termOS)%/12
     matMonth=(valYear*12+valMonth+termOS)%%12
     prop=(real matMonth)/12f32
