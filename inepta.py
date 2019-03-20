@@ -628,9 +628,9 @@ for l in ift.readlines():
             if not l.__contains__(","):
                 print("Warning: No commas in rebase times.  Is this the intention?")
 
-#zero vectors for extending variable size array calcs to fixed size
-for i in sizemaxs:
-    off.write("let vec__"+str(i)+"=replicate "+str(i)+" 0f32"+nl)
+#zero vectors for extending variable size array calcs to fixed size; this seems to cause serialisation so commented out FTB
+#for i in sizemaxs:
+#    off.write("let vec__"+str(i)+"=replicate "+str(i)+" 0f32"+nl)
 
 #in certain cases we might want to process the top model with the others
 modelInfosPlus=modelInfos.copy()
@@ -864,6 +864,8 @@ def convCode(mi,ci,codeType,theCalls=[]):#print converted code and return the ex
         for ind in range(1, ci.numDims + 1):  # array index parameters
             off.write(" (i" + str(ind) + ":i32) ")
         off.write(":"+("i" if ci.type!="real" else "f")+"32=\n")
+        if ci.sizeMax!="":#Latest method for variable sized arrays: call with fixed dimenssion size but place if..then inside mapped function.  In truth, not obvious it provides a real gain.
+            off.write("if i1<as.p."+ci.sizeMax+" then "+nl)
     isQuoted=False
     for l in code:  # loop through lines
         currentCalcLine+=1
@@ -1170,6 +1172,8 @@ def convCode(mi,ci,codeType,theCalls=[]):#print converted code and return the ex
         if haveTempVars and len(code)==1:
             off.write(" in ")
         off.write(l+nl)
+    if ci.sizeMax != "":
+        off.write("else 0 "+nl)#variable sized array - "else" case
     if ci.isArrayed and mi.phaseDirections[phName] != "static":#multi-level mappings for arrayed
         for ind in range(1, ci.numDims):  # loop over map functions
             off.write("let " + ci.name + "_arr" + str(ci.numDims - ind))
@@ -1181,10 +1185,10 @@ def convCode(mi,ci,codeType,theCalls=[]):#print converted code and return the ex
                 off.write(" i" + str(ind2) + " ")
             off.write(") (iota " + str(
                 ci.dimSizes[ci.numDims - ind]) + ") \n")  # the iota to which we apply the partial application
-        if ci.sizeMax=="":
-            off.write("in map " + ci.name + "_arr1 (iota " + str(ci.dimSizes[0]) + ")\n")#fixed array size
-        else:
-            off.write("in map " + ci.name + "_arr1 (iota " + "as.p."+ci.sizeMax + ")\n")#array with maximum size but upper bound for calcs given by data
+        #if ci.sizeMax=="":
+        off.write("in map " + ci.name + "_arr1 (iota " + str(ci.dimSizes[0]) + ")\n")#fixed array size.  FTB, always call with fixed size, otherwsise we ger seriallisation
+        #else:
+        #    off.write("in map " + ci.name + "_arr1 (iota " + "as.p."+ci.sizeMax + ")\n")#array with maximum size but upper bound for calcs given by data
     currentCalcInfoObject=None
 
 #Global function code (this is user defined, so not read verbatim)
@@ -1740,16 +1744,17 @@ for mi in modelInfos.values():
                 off.write(" (state_" + mi.name + "_all,*[][]f32)=" + nl)
             else:
                 off.write(" state_" + mi.name + "_all=" + nl)
-            for ci in ph.values():#extend arrays that have a sizeMax so that all arrays are irregular (else the compiler bombs out)
-                if ci.stores >= 1 and ci.sizeMax!="":
-                    off.write("let "+ci.name+"__extended=copy vec__"+str(ci.dimSizes[0])+nl)
-                    off.write("let "+ci.name + "__extended[:as.p."+ci.sizeMax+"]="+ci.name+nl)
+            #for ci in ph.values():#extend arrays that have a sizeMax so that all arrays are irregular (else the compiler bombs out)
+            #    if ci.stores >= 1 and ci.sizeMax!="":
+            #        off.write("let "+ci.name+"__extended=copy vec__"+str(ci.dimSizes[0])+nl)
+            #        off.write("let "+ci.name + "__extended[:as.p."+ci.sizeMax+"]="+ci.name+nl)
             for i in range(mi.maxStored ,0,-1):#stored states
                 off.write("let state__"+str(i)+"=as.state__"+str(i))
                 for ci in ph.values():
                     if ci.stores >= i or (i==1 and ci.isOutput and outputMode=="SCALAR"):
                         for fld in ci.fieldsCalcd:
-                            off.write(" with "+fld+"="+("as.state__"+str(i-1)+"." if i>1 else "")+fld+("__extended" if ci.sizeMax!="" else ""))
+                            #off.write(" with "+fld+"="+("as.state__"+str(i-1)+"." if i>1 else "")+fld+("__extended" if ci.sizeMax!="" else ""))
+                           off.write(" with "+fld+"="+("as.state__"+str(i-1)+"." if i>1 else "")+fld)
                 off.write(nl)
             off.write("let asNew=as "+nl)#new all-state
             for i in range(1, mi.maxStored + 1):
