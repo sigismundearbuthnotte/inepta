@@ -2,7 +2,7 @@
 mode=independent
 output=scalar
 stochastic=true
-numScenarios=10
+numScenarios=1000
 numInnerScenarios=0
 file=scens.txt
 [end]

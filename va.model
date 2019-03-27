@@ -51,8 +51,24 @@ name=phase1
 start=firstProjectionPeriod
 
 ###constant,type=int
+gbAmtType1=
+return if (productType==DBIB||productType==DBMB||productType==DBSU||productType==DBWB||productType==IBSU||productType==MBSU||productType==WBSU) then 1 else 0
+
+###constant,type=int
+gbAmtType2=
+return if (productType==ABSU||productType==DBAB) then 1 else 0
+
+###constant,type=int
+gbAmtType3=
+return if (productType==DBRP||productType==IBRP||productType==MBRP||productType==WBRP) then 1 else 0
+
+###constant,type=int
+gbAmtType4=
+return if (productType==DBRU||productType==IBRU||productType==MBRU||productType==WBRU) then 1 else 0
+
+###constant,type=int
 hasIB=
-return if productType==DBIB||productType==IBRP||productType==IBRU||productType==IBSU then 1 else 0
+return if (productType==DBIB||productType==IBRP||productType==IBRU||productType==IBSU) then 1 else 0
 
 ###constant,type=int
 hasDeathBen=
@@ -133,11 +149,11 @@ return discFac__1*discFacMonth
 gbAmt=
 res=
     if productType==ABRP then if termOSToRenewal__1 == 1 then maxr(gbAmtCF__1,accountValueBeforeGB) else gbAmtCF__1
-    else if productType==DBIB||productType==DBMB||productType==DBSU||productType==DBWB||productType==IBSU||productType==MBSU||productType==WBSU then if termIFMonths==0 then maxr(gbAmtCF__1,accountValueBeforeGB) else gbAmtCF__1
     else if productType==ABRU then if termOSToRenewal__1 == 1 then maxr(gbAmtCF__1*rollupMonthly,accountValueBeforeGB) else gbAmtCF__1*rollupMonthly
-    else if productType==ABSU||productType==DBAB then if termIFMonths==0||termOSToRenewal__1==1 then maxr(gbAmtCF__1,accountValueBeforeGB) else gbAmtCF__1
-    else if productType==DBRP||productType==IBRP||productType==MBRP||productType==WBRP then gbAmt_d*survCF__1
-    else if productType==DBRU||productType==IBRU||productType==MBRU||productType==WBRU then gbAmtCF__1*rollupMonthly
+    else if gbAmtType1==1  then if termIFMonths==0 then maxr(gbAmtCF__1,accountValueBeforeGB) else gbAmtCF__1
+    else if gbAmtType2==1  then if termIFMonths==0||termOSToRenewal__1==1 then maxr(gbAmtCF__1,accountValueBeforeGB) else gbAmtCF__1
+    else if gbAmtType3==1  then gbAmt_d*survCF__1
+    else if gbAmtType4==1  then gbAmtCF__1*rollupMonthly
     else 0
 return res
 
