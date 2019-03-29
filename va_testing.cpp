@@ -9,6 +9,7 @@
 
 #define REAL float
 //#define debug
+#define openacc
 
 using namespace std;
 
@@ -25,8 +26,8 @@ int main()
 
     //constants
     const int numPeriods=360;
-    const int numScens=10;
-    const int numPols=190000;//190000;
+    const int numScens=1000;
+    const int numPols=190000;
     const int numFunds=10;
     const int numCalYears=90;
     const int firstCalYear=2018;
@@ -61,10 +62,7 @@ int main()
 
     //read tables
     REAL mort_pre_ret[116][2];
-    REAL *mort_post_ret[2][201];
-    for (int i=0;i<2;++i)
-        for (int j=0;j<201;++j)
-            mort_post_ret[i][j]=new REAL[numCalYears];
+    REAL mort_post_ret[2][201][numCalYears];
     ifstream inFile;
     #ifdef debug
         ofstream ofile;
@@ -92,18 +90,74 @@ int main()
     }
     inFile.close();
 
-    //read scenarios
-    REAL ***fundRets,**annDiscRate;
-    fundRets=new REAL**[numScens];
-    for (int scen=0;scen<numScens;++scen)
+    //read data
+    int *sexes,*productTypes,*ageYears_ds,*ageMonths_ds,*numFunds_ds,*fundCodes,*termOSs,*elapsedMonthss,*termToNextRenewals,*renewalTerms;
+
+    sexes=new int[numPols];
+    productTypes=new int[numPols];
+    ageYears_ds=new int[numPols];
+    ageMonths_ds=new int[numPols];
+    numFunds_ds=new int[numPols];
+    fundCodes=new int[numPols*10];
+    termOSs=new int[numPols];
+    elapsedMonthss=new int[numPols];
+    termToNextRenewals=new int[numPols];
+    renewalTerms=new int[numPols];
+
+    REAL *baseFee_ds,*riderFee_ds,*rollUpRates,*gbAmt_ds,*gmwbBalance_ds,*wbWithdrawalRates,*withdrawals,*gteedAnnFacs,
+        *fundValues,*fundFees;
+    baseFee_ds=new REAL[numPols];
+    riderFee_ds=new REAL[numPols];
+    rollUpRates=new REAL[numPols];
+    gbAmt_ds=new REAL[numPols];
+    gmwbBalance_ds=new REAL[numPols];
+    wbWithdrawalRates=new REAL[numPols];
+    withdrawals=new REAL[numPols];
+    gteedAnnFacs=new REAL[numPols];
+    fundValues=new REAL[numPols*10];
+    fundFees=new REAL[numPols*10];
+
+    inFile.open(data_fileName.c_str());
+    getline(inFile,line);
+    int pos=0;
+    for (int pol=0;pol<numPols;++pol)
     {
-        fundRets[scen]=new REAL*[numPeriods];
-        for (int i=0;i<numPeriods;++i)
-            fundRets[scen][i]=new REAL[numFunds];
+        int ii;
+        string l;
+        getline(inFile,line);
+        istringstream iss(line);
+        iss>>ii;
+        iss>>l;
+        if (l=="male")
+            sexes[pol]=0;
+        else
+            sexes[pol]=1;
+        iss>>l;
+        productTypes[pol]=products[l];
+        iss>>ageYears_ds[pol]>>ageMonths_ds[pol]>>baseFee_ds[pol]>>riderFee_ds[pol]>>rollUpRates[pol]>>gbAmt_ds[pol]>>gmwbBalance_ds[pol]>>wbWithdrawalRates[pol]>>
+            withdrawals[pol]>>numFunds_ds[pol];
+        for (int i=0;i<numFunds;++i)
+        {
+            iss>>l;
+            fundCodes[pos++]=fCodes[l];
+        }
+        pos-=numFunds;
+        for (int i=0;i<numFunds;++i)
+            iss>>fundValues[pos++];
+        pos-=numFunds;
+        for (int i=0;i<numFunds;++i)
+            iss>>fundFees[pos++];
+        pos+=10-numFunds;
+        iss>>termOSs[pol]>>elapsedMonthss[pol]>>termToNextRenewals[pol]>>renewalTerms[pol]>>gteedAnnFacs[pol];
     }
-    annDiscRate=new REAL*[numScens];
-    for (int scen=0;scen<numScens;++scen)
-        annDiscRate[scen]=new REAL[numPeriods];
+    inFile.close();
+
+    //read scenarios
+    REAL *fundRets,*annDiscRate;
+    fundRets=new REAL[numScens*numPeriods*10];
+    pos=0;
+    int pos2=0;
+    annDiscRate=new REAL[numScens*numPeriods];
     inFile.open(scen_fileName.c_str());
     for (int scen=0;scen<numScens;++scen)
     {
@@ -113,47 +167,45 @@ int main()
             getline(inFile,line);
             istringstream iss(line);
             iss>>ii;
-            for (int f=0;f<numFunds;++f)
-                iss>>fundRets[scen][i][f];
-            iss>>annDiscRate[scen][i];
+            for (int f=0;f<10;++f)
+                iss>>fundRets[pos++];
+            iss>>annDiscRate[pos2++];
         }
     }
     inFile.close();
 
     //calcs
-    inFile.open(data_fileName.c_str());
-    getline(inFile,line);
     //policy loop
-    /*double*/REAL totCOG=0;
+    REAL totCOG=0;
+    #ifdef openacc
+        #pragma acc parallel loop gang vector reduction(+:totCOG) copyin(fundRets[0:numScens*numPeriods*10]) copyin(annDiscRate[0:numScens*numPeriods]) copyin(mort_pre_ret[0:116][0:2]) copyin(mort_post_ret[0:2][0:201][0:numCalYears])
+    #endif
     for (int pol=0;pol<numPols;++pol)
     {
-        //read data
-        int ii,sex,productType,ageYears_d,ageMonths_d,numFunds_d,fundCode[numFunds],termOS,elapsedMonths,termToNextRenewal,renewalTerm;
-        string l;
+        int sex,productType,ageYears_d,ageMonths_d,numFunds_d,*fundCode,termOS,elapsedMonths,termToNextRenewal,renewalTerm;
         REAL baseFee_d,riderFee_d,rollUpRate,gbAmt_d,gmwbBalance_d,wbWithdrawalRate,withdrawal,gteedAnnFac,
-            fundValue[numFunds],fundFee[numFunds];
-        getline(inFile,line);
-        istringstream iss(line);
-        iss>>ii;
-        iss>>l;
-        if (l=="male")
-            sex=0;
-        else
-            sex=1;
-        iss>>l;
-        productType=products[l];
-        iss>>ageYears_d>>ageMonths_d>>baseFee_d>>riderFee_d>>rollUpRate>>gbAmt_d>>gmwbBalance_d>>wbWithdrawalRate>>
-            withdrawal>>numFunds_d;
-        for (int i=0;i<numFunds;++i)
-        {
-            iss>>l;
-            fundCode[i]=fCodes[l];
-        }
-        for (int i=0;i<numFunds;++i)
-            iss>>fundValue[i];
-        for (int i=0;i<numFunds;++i)
-            iss>>fundFee[i];
-        iss>>termOS>>elapsedMonths>>termToNextRenewal>>renewalTerm>>gteedAnnFac;
+            *fundValue,*fundFee;
+
+        sex=sexes[pol];
+        productType=productTypes[pol];
+        ageYears_d=ageYears_ds[pol];
+        ageMonths_d=ageMonths_ds[pol];
+        numFunds_d=numFunds_ds[pol];
+        fundCode=&fundCodes[pol*10];
+        termOS=termOSs[pol];
+        elapsedMonths=elapsedMonthss[pol];
+        termToNextRenewal=termToNextRenewals[pol];
+        renewalTerm=renewalTerms[pol];
+        baseFee_d=baseFee_ds[pol];
+        riderFee_d=riderFee_ds[pol];
+        rollUpRate=rollUpRates[pol];
+        gbAmt_d=gbAmt_ds[pol];
+        gmwbBalance_d=gmwbBalance_ds[pol];
+        wbWithdrawalRate=wbWithdrawalRates[pol];
+        withdrawal=withdrawals[pol];
+        gteedAnnFac=gteedAnnFacs[pol];
+        fundValue=&fundValues[pol*10];
+        fundFee=&fundFees[pol*10];
 
         REAL cog=0;
         bool hasIB=productType==DBIB||productType==IBRP||productType==IBRU||productType==IBSU;
@@ -208,9 +260,10 @@ int main()
 
                 REAL fundAfterGrowth[numFunds],riderFee[numFunds],baseFee[numFunds],fundAfterRiskFees[numFunds];
                 REAL fees=0;
+                int fbase=scen*360*10+(t-1)*10;
                 for (int f=0;f<numFunds_d;++f)
                 {
-                    fundAfterGrowth[f]=fundCF__1[f]*fundRets[scen][t-1][fundCode[f]]*(1-fundFee[f]/12);
+                    fundAfterGrowth[f]=fundCF__1[f]*fundRets[fbase+fundCode[f]]*(1-fundFee[f]/12);
                     riderFee[f]=fundAfterGrowth[f]*riderFee_d/12;
                     baseFee[f]=fundAfterGrowth[f]*baseFee_d/12;
                     fees+=baseFee[f]+riderFee[f];
@@ -274,7 +327,7 @@ int main()
                 if (hasIB&&t==termOS)
                 {
                     REAL disc=1;
-                    REAL annDisc=1/(1+annDiscRate[scen][t-1]);
+                    REAL annDisc=1/(1+annDiscRate[scen*360+t-1]);
                     for (int i=0;i<55;++i,disc*=annDisc)
                         mktAnnFac+=annSurv[i]*disc;
                 }
@@ -351,20 +404,31 @@ int main()
         //cog
         totCOG+=cog;
     }
-    inFile.close();
-    for (int i=0;i<2;++i)
-        for (int j=0;j<116;++j)
-            delete []mort_post_ret[i][j];
-    for (int scen=0;scen<numScens;++scen)
-    {
-        for (int t=0;t<numPeriods;++t)
-            delete[]fundRets[scen][t];
-        delete []fundRets[scen];
-    }
+
     delete[]fundRets;
-    for (int scen=0;scen<numScens;++scen)
-        delete []annDiscRate[scen];
     delete []annDiscRate;
+
+    delete []sexes;
+    delete []productTypes;
+    delete []ageYears_ds;
+    delete []ageMonths_ds;
+    delete []numFunds_ds;
+    delete []fundCodes;
+    delete []termOSs;
+    delete []elapsedMonthss;
+    delete []termToNextRenewals;
+    delete []renewalTerms;
+
+    delete []baseFee_ds;
+    delete []riderFee_ds;
+    delete []rollUpRates;
+    delete []gbAmt_ds;
+    delete []gmwbBalance_ds;
+    delete []wbWithdrawalRates;
+    delete []withdrawals;
+    delete []gteedAnnFacs;
+    delete []fundValues;
+    delete []fundFees;
 
     printf("COG=%f",totCOG);
     return 0;

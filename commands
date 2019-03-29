@@ -1,5 +1,52 @@
 futhark-c --library cwp.fut
+futhark-opencl --library cwp.fut
 
 gcc cwp.c -o libcwp.so -O3 -fPIC -shared
 
 gcc call_cwp.c libcwp.so -O3 -lm -ocall_cwp
+gcc call_cwp.c libcwp.so -O3 -lm -lOpenCL -ocall_cwp
+
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/inepta
+
+
+
+ futhark opencl --library futhark_ia_simpler.fut 
+ gcc futhark_ia_simpler.c -olibfuthark_ia_simpler.so -O3 -fPIC -shared
+ gcc call_futhark.c -I/home/andrew/futhark/inepta/src/c++ -L/home/andrew/futhark/inepta/src/c++/ -L/home/andrew/futhark/inepta/manual_ia/exe/ -O3 -lm -ocall_futhark -lfuthark_ia_simpler -lOpenCL -lreading  -lstdc++ 
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/futhark/inepta/src/c++:~/futhark/inepta/manual_ia/exe:
+ 
+futhark cuda --library futhark_ia_simpler.fut 
+gcc futhark_ia_simpler.c -olibfuthark_ia_simpler.so -O3 -fPIC -shared
+gcc call_futhark.c -I/home/andrew/futhark/inepta/src/c++ -L/usr/local/cuda/lib64   -L/home/andrew/futhark/inepta/src/c++/ -L/home/andrew/futhark/inepta/manual_ia/exe/ -O3 -lm -ocall_futhark -lfuthark_ia_simpler  -lnvrtc -lcuda -lreading  -lstdc++
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/futhark/inepta/src/c++:~/futhark/inepta/manual_ia/exe:/usr/local/cuda/lib64
+
+Obsolete:
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/futhark/inepta/src/c++
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/futhark/inepta/manual_ia/exe
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64
+ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/futhark/inepta/src/c++
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/futhark/inepta/manual_ia/exe
+
+*************************************************************
+futhark  opencl --library futhark.fut
+gcc futhark.c -o libfuthark.so -O3 -fPIC -shared
+gcc call_futhark.c -I/home/andrew/futhark/inepta/src/c++ -L/home/andrew/futhark/inepta/src/c++/ -L/home/andrew/futhark/inepta/va/exe/ -O3 -lm -ocall_futhark -lfuthark -lOpenCL -lreading  -lstdc++ 
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/futhark/inepta/src/c++:~/futhark/inepta/va/exe:
+./call_futhark
+
+
+gcc call_futhark.c -I/home/andrew/futhark/inepta/src/c++ -L/usr/local/cuda/lib64   -L/home/andrew/futhark/inepta/src/c++/ -L/home/andrew/futhark/inepta/va/exe/ -O3 -lm -ocall_futhark -lfuthark  -lnvrtc -lcuda -lreading  -lstdc++
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64
+*************************************************************
+
+for debugging opencl:
+    struct futhark_context_config * cfg = futhark_context_config_new();
+    futhark_context_config_set_debugging(cfg,1);
+    futhark_context_config_set_logging(cfg,1);
+    struct futhark_context * ctx = futhark_context_new(cfg);
+
+Has minor effect:
+    FUTHARK_INCREMENTAL_FLATTENING=1
+
+OPENACC
+pgc++ --c++11 -fast -Minfo=accel -ta=tesla:cc60,managed -L/opt/pgi/linux86-64/18.10/lib  -lstdc++ va_testing.cpp -ova_testing
